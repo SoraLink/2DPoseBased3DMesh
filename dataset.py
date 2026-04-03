@@ -154,10 +154,21 @@ class DeterministicAmputeeEvalDataset(Dataset):
 
 
 class RealBaselineHeatmapDataset(Dataset):
-    def __init__(self, coco_ann_file, dense_pose_ann_file, img_size=(256, 192)):
+    def __init__(
+            self,
+            coco_ann_file,
+            dense_pose_ann_file,
+            img_size=(256, 192),
+            output_downsample=4,
+            input_sigma=4.0,
+            output_sigma=2.0,
+    ):
         self.img_size = img_size
         self.coco = COCO(coco_ann_file)
         self.dense_pose_ann_file = dense_pose_ann_file
+        self.output_downsample = output_downsample
+        self.input_sigma = input_sigma
+        self.output_sigma = output_sigma
         self.amputation_types = [
             {'name': 'Above Left Elbow', 'limb_id': 'left_arm', 'p': 5, 'd': 7, 'r': 17, 'lost_pts': [7, 9],
              'dp_parts': [15, 17]},
@@ -249,15 +260,24 @@ class RealBaselineHeatmapDataset(Dataset):
         input_heatmaps = np.zeros((25, self.img_size[0], self.img_size[1]), dtype=np.float32)
         for i in range(25):
             if status[i] == 0:
-                input_heatmaps[i] = self._generate_gaussian_heatmap_optimized(coords[i], self.img_size)
+                input_heatmaps[i] = self._generate_gaussian_heatmap_optimized(
+                    coords[i],
+                    self.img_size,
+                    sigma=self.input_sigma
+                )
 
-        gt_heatmaps = np.zeros((8, self.img_size[0], self.img_size[1]), dtype=np.float32)
+        out_H, out_W = self.img_size[0] // self.output_downsample, self.img_size[1] // self.output_downsample
+        gt_heatmaps = np.zeros((8, out_H, out_W), dtype=np.float32)
         target_weights = np.zeros((8,), dtype=np.float32)
 
         for i, amputation in enumerate(self.amputation_types):
             target_d = amputation['d']
             if status[target_d] == 1:
-                gt_heatmaps[i] = self._generate_gaussian_heatmap_optimized(coords[target_d], self.img_size)
+                down_coord = coords[target_d] / self.output_downsample
+                gt_heatmaps[i] = self._generate_gaussian_heatmap_optimized(
+                    down_coord,
+                    (out_H, out_W),
+                    sigma=self.output_sigma)
                 target_weights[i] = 1.0
 
         return {
