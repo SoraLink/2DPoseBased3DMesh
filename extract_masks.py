@@ -29,10 +29,9 @@ def extract_densepose_to_instance_png(json_path, output_dir):
             x_min, y_min, w, h = ann['bbox']
             x, y, w, h = int(x_min), int(y_min), int(w), int(h)
 
-            part_ids = ann['dp_I']
             rle_masks = ann['dp_masks']
 
-            for part_id, rle in zip(part_ids, rle_masks):
+            for i, rle in enumerate(rle_masks):
                 patch_mask = maskUtils.decode(rle)
 
                 if patch_mask.size == 0:
@@ -57,7 +56,7 @@ def extract_densepose_to_instance_png(json_path, output_dir):
                 px2, py2 = px1 + (x2 - x1), py1 + (y2 - y1)
 
                 valid_patch = patch_mask_resized[py1:py2, px1:px2]
-                instance_canvas[y1:y2, x1:x2][valid_patch > 0] = part_id
+                instance_canvas[y1:y2, x1:x2][valid_patch > 0] = i+1
 
             ann_id = ann['id']
             save_path = os.path.join(output_dir, f"{img_id:012d}_{ann_id}.png")
