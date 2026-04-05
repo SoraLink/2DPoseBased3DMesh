@@ -15,7 +15,6 @@ def extract_densepose_to_instance_png(json_path, output_dir):
 
     for img_id in tqdm(img_ids):
         img_info = coco.loadImgs(img_id)[0]
-        original_file_name = img_info['file_name']
         H, W = img_info['height'], img_info['width']
 
         ann_ids = coco.getAnnIds(imgIds=img_id)
@@ -23,7 +22,7 @@ def extract_densepose_to_instance_png(json_path, output_dir):
 
         for ann in anns:
             if 'dp_masks' not in ann or 'dp_I' not in ann:
-                raise ValueError(f"Missing dp_masks or dp_I in ann: {ann}")
+                continue
 
             instance_canvas = np.zeros((H, W), dtype=np.uint8)
 
@@ -58,7 +57,7 @@ def extract_densepose_to_instance_png(json_path, output_dir):
                 px2, py2 = px1 + (x2 - x1), py1 + (y2 - y1)
 
                 valid_patch = patch_mask_resized[py1:py2, px1:px2]
-                instance_canvas[y1:y2, x1:x2][valid_patch > 0] = 255
+                instance_canvas[y1:y2, x1:x2][valid_patch > 0] = part_id
 
             ann_id = ann['id']
             save_path = os.path.join(output_dir, f"{img_id:012d}_{ann_id}.png")
@@ -67,6 +66,6 @@ def extract_densepose_to_instance_png(json_path, output_dir):
     print(f"✅ Successfully extracted DensePose masks to instance PNGs. Saved in: {output_dir}")
 
 if __name__ == "__main__":
-    json_file = "./data/densepose_coco_2014_train.json"
-    out_folder = "./data/densepose_masks_instance/"
+    json_file = "./data/densepose_coco_2014_minival.json"
+    out_folder = "./data/densepose_masks_instance_val/"
     extract_densepose_to_instance_png(json_file, out_folder)
