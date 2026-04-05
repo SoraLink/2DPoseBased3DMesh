@@ -162,6 +162,7 @@ class RealBaselineHeatmapDataset(Dataset):
             output_downsample=4,
             input_sigma=4.0,
             output_sigma=2.0,
+            is_val=False,
     ):
         self.img_size = img_size
         self.coco = COCO(coco_ann_file)
@@ -190,72 +191,58 @@ class RealBaselineHeatmapDataset(Dataset):
 
         ann_ids = self.coco.getAnnIds(iscrowd=False)
         self.valid_anns = []
+        self.is_val = is_val
+
+        if self.is_val:
+            rng = np.random.RandomState(42)
 
         for ann_id in ann_ids:
             ann = self.coco.loadAnns(ann_id)[0]
             if 'keypoints' in ann and ann['num_keypoints'] > 5:
-                self.valid_anns.append(ann)
+                kpts = ann['keypoints']
+                ann_id = ann['id']
+                image_id = ann['image_id']
+
+                x_min, y_min, w, h = ann['bbox']
+                if w < 10 or h < 10:
+                    w, h = 10, 10
+
+                H_net, W_net = self.img_size
+                coords = np.zeros((25, 2), dtype=np.float32)
+                status = np.full(25, 2, dtype=np.int64)
+
+                for i in range(17):
+                    x_abs, y_abs, v = kpts[i * 3], kpts[i * 3 + 1], kpts[i * 3 + 2]
+                    if v > 0:
+                        x_rel = x_abs - x_min
+                        y_rel = y_abs - y_min
+                        x_net = x_rel * (W_net / w)
+                        y_net = y_rel * (H_net / h)
+                        coords[i] = [x_net, y_net]
+                        status[i] = 0
+                    else:
+                        coords[i] = [0, 0]
+                if self.is_val:
+                    self._generate_residual_point(status, image_id, ann_id, coords, ann['bbox'], rng=rng)
+
+                self.valid_anns.append({
+                    'ann_id': ann_id,
+                    'ann'   : ann,
+                    'coords': coords,
+                    'status': status,
+                })
         print(f"✅ Finished loading {len(self.valid_anns)} valid annotations.")
 
     def __len__(self):
         return len(self.valid_anns)
 
     def __getitem__(self, idx):
-        ann = self.valid_anns[idx]
-        kpts = ann['keypoints']
-        ann_id = ann['id']
-        image_id = ann['image_id']
-
-        x_min, y_min, w, h = ann['bbox']
-        if w < 10 or h < 10:
-            w, h = 10, 10
-
-        H_net, W_net = self.img_size
-        coords = np.zeros((25, 2), dtype=np.float32)
-        status = np.full(25, 2, dtype=np.int64)
-
-        for i in range(17):
-            x_abs, y_abs, v = kpts[i * 3], kpts[i * 3 + 1], kpts[i * 3 + 2]
-            if v > 0:
-                x_rel = x_abs - x_min
-                y_rel = y_abs - y_min
-                x_net = x_rel * (W_net / w)
-                y_net = y_rel * (H_net / h)
-                coords[i] = [x_net, y_net]
-                status[i] = 0
-            else:
-                coords[i] = [0, 0]
-
-        amputated_limbs = set()
-
-        indices = list(range(len(self.amputation_types)))
-        random.shuffle(indices)
-
-        for idx in indices:
-            amputation = self.amputation_types[idx]
-            limb_id = amputation['limb_id']
-
-            if limb_id in amputated_limbs:
-                continue
-
-            if random.random() < 0.5:
-                p, d, r = amputation['p'], amputation['d'], amputation['r']
-                lost_pts, dp_parts = amputation['lost_pts'], amputation['dp_parts']
-
-                if status[p] == 0 and status[d] == 0:
-                    limb_mask = self._load_densepose_mask(image_id, ann_id, dp_parts, ann['bbox'])
-
-                    cut_ratio = random.uniform(0.1, 0.9)
-                    R_r = self._sample_residual_point_with_mask(coords[p], coords[d], cut_ratio, limb_mask)
-
-                    for pt in lost_pts:
-                        status[pt] = 2
-
-                    status[d] = 1
-                    coords[r] = R_r
-                    status[r] = 0
-
-                    amputated_limbs.add(limb_id)
+        ann_info = self.valid_anns[idx]
+        ann = ann_info['ann']
+        coords = ann_info['coords'].copy()
+        status = ann_info['status'].copy()
+        if not self.is_val:
+            self._generate_residual_point(status, ann['image_id'], ann_info['id'], coords, ann['bbox'])
 
         input_heatmaps = np.zeros((25, self.img_size[0], self.img_size[1]), dtype=np.float32)
         for i in range(25):
@@ -316,7 +303,7 @@ class RealBaselineHeatmapDataset(Dataset):
 
         return limb_mask_resized
 
-    def _sample_residual_point_with_mask(self, coords_p, coords_d, cut_ratio, limb_mask):
+    def _sample_residual_point_with_mask(self, coords_p, coords_d, cut_ratio, limb_mask, rng=None):
 
         vec_bone = coords_d - coords_p
         R_base = coords_p + cut_ratio * vec_bone # Cut Point
@@ -358,7 +345,7 @@ class RealBaselineHeatmapDataset(Dataset):
 
         max_tries = 10
         for _ in range(max_tries):
-            offset = np.random.normal(loc=0.0, scale=sigma)
+            offset = rng.normal(loc=0.0, scale=sigma) if rng is not None else np.random.normal(loc=0.0, scale=sigma)
 
             if -dist_neg <= offset <= dist_pos:
                 R_r_new = R_base + offset * unit_u
@@ -397,3 +384,38 @@ class RealBaselineHeatmapDataset(Dataset):
         heatmap[y1:y2, x1:x2] = gaussian_patch[patch_y1:patch_y2, patch_x1:patch_x2]
 
         return heatmap
+
+    def _generate_residual_point(self, status, image_id, ann_id, coords, bbox, rng=None):
+        amputated_limbs = set()
+        indices = list(range(len(self.amputation_types)))
+        if rng is not None:
+            rng.shuffle(indices)
+        else:
+            random.shuffle(indices)
+
+        for idx in indices:
+            amputation = self.amputation_types[idx]
+            limb_id = amputation['limb_id']
+
+            if limb_id in amputated_limbs:
+                continue
+
+            is_amputate = rng.rand() < 0.5 if rng is not None else random.random() < 0.5
+            if is_amputate:
+                p, d, r = amputation['p'], amputation['d'], amputation['r']
+                lost_pts, dp_parts = amputation['lost_pts'], amputation['dp_parts']
+
+                if status[p] == 0 and status[d] == 0:
+                    limb_mask = self._load_densepose_mask(image_id, ann_id, dp_parts, bbox)
+
+                    cut_ratio = rng.uniform(0.1, 0.9) if rng is not None else random.uniform(0.1, 0.9)
+                    R_r = self._sample_residual_point_with_mask(coords[p], coords[d], cut_ratio, limb_mask, rng)
+
+                    for pt in lost_pts:
+                        status[pt] = 2
+
+                    status[d] = 1
+                    coords[r] = R_r
+                    status[r] = 0
+
+                    amputated_limbs.add(limb_id)
