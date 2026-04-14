@@ -2,10 +2,7 @@ import json
 import math
 import os
 import re
-import time
 
-import requests
-import dashscope
 from dashscope import MultiModalConversation
 import numpy as np
 
@@ -257,17 +254,13 @@ class AgenticImageEditor:
         self.eval_model = eval_model
         self.max_iterations = 3
         self.base_instruction = """
-        [Task: High-Precision Anatomical Inpainting]
-        Objective: Restore missing limbs to create a realistic able-bodied person.
-
-        [Hard Constraints - MUST FOLLOW]
-        - Preserve Original: Keep existing torso, head, and limbs 100% unchanged.
-        - Anatomical Alignment: Extend the new limb strictly along the direction of the residual limb.
-        - Joint Integrity: DO NOT alter any original joint angles or body posture.
-        - Completeness: Ensure the final output has two arms and two legs with visible hands/feet.
-
-        [Visual Consistency]
-        - Seamlessly match original skin texture, lighting, and clothing style.
+        [Task: Semantic-Level Limb Completion]
+        Objective: Perform local inpainting and completion on the subject's missing limb parts to generate a person with four intact limbs. All four limbs must be clearly visible.
+        
+        [Strict Negative Constraints - Never Deviate]:
+        1. It is strictly prohibited to alter the original torso, head, and any existing intact limbs. These parts must remain exactly as they are.
+        2. When completing the missing limbs, you must strictly follow the direction of the existing stump. Do not cause any joint angles to change after the completion.
+        3. The entire person must be completely within the image; no part of the body should fall outside the frame.
         """
 
     def edit_image(self, image_url, prompt, mask_url=None):
@@ -389,6 +382,7 @@ class AgenticImageEditor:
                 eval_res = self.evaluate_image(image_url, current_url, self.base_instruction)
                 print(f"📊 评估: {'✅ 通过' if eval_res['passed'] else '❌ 未通过'}")
                 print(f"📝 原因: {eval_res.get('reason', '-')}")
+                print(f" 意见: {eval_res.get('suggestion', '-')}")
 
                 if eval_res["passed"]:
                     print("🎉 约束全部满足，提前结束迭代！")
