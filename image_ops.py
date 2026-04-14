@@ -104,7 +104,7 @@ class OSSProcessor:
     def __init__(self):
         self.access_key_id = os.getenv('OSS_ACCESS_KEY_ID')
         self.access_key_secret = os.getenv('OSS_ACCESS_KEY_SECRET')
-        self.endpoint = os.getenv('OSS_ENDPOINT')
+        self.endpoint = os.getenv('OSS_ENDPOINT')  # 如: oss-cn-beijing.aliyuncs.com
         self.bucket_name = os.getenv('OSS_BUCKET_NAME')
 
         if not all([self.access_key_id, self.access_key_secret, self.endpoint, self.bucket_name]):
@@ -112,13 +112,12 @@ class OSSProcessor:
 
         self.auth = oss2.Auth(self.access_key_id, self.access_key_secret)
 
-        # 🚀 修复 Bug 2: 阿里云 SDK 配置超时的正确姿势
-        oss2.defaults.connect_timeout = 60  # 放大握手超时时间
-        oss2.defaults.request_retries = 5  # 放大请求失败的自动重试次数
+        # 全局超时 & 重试配置
+        oss2.defaults.connect_timeout = 60
+        oss2.defaults.socket_timeout = 120  # 🔑 新增：读写超时
+        oss2.defaults.request_retries = 5
 
-        # 因为后续要开多线程分片上传，需将连接池调大以防阻塞
         session = oss2.Session(pool_size=10)
-
         self.bucket = oss2.Bucket(
             self.auth,
             self.endpoint,
@@ -126,7 +125,36 @@ class OSSProcessor:
             session=session
         )
 
-    def upload_and_get_url(self, local_file_path, folder="agent_images"):
+    def _build_public_url(self, object_name):
+        """🔑 核心：构造公开可读的永久链接"""
+        # endpoint 示例: oss-cn-beijing.aliyuncs.com
+        # 目标格式: https://{bucket}.oss-cn-beijing.aliyuncs.com/{object_name}
+
+        # 提取 region 部分（兼容不同 endpoint 格式）
+        if self.endpoint.startswith('http'):
+            domain = self.endpoint.split('://', 1)[1]
+        else:
+            domain = self.endpoint
+
+        # 确保 bucket 在域名最前面
+        if self.bucket_name in domain:
+            # 已经是 {bucket}.oss-xxx 格式，直接使用
+            public_domain = domain
+        else:
+            # 标准格式：bucket.oss-region.aliyuncs.com
+            public_domain = f"{self.bucket_name}.{domain}"
+
+        return f"https://{public_domain}/{object_name}"
+
+    def upload_and_get_url(self, local_file_path, folder="agent_images", make_public=True):
+        """
+        上传文件到 OSS 并返回 URL
+
+        Args:
+            local_file_path: 本地文件路径
+            folder: OSS 中的文件夹路径
+            make_public: 🔑 是否设置为公共读（默认 True，供 DashScope 访问）
+        """
         if not os.path.exists(local_file_path):
             raise FileNotFoundError(f"❌ 找不到要上传的文件: {local_file_path}")
 
@@ -134,28 +162,34 @@ class OSSProcessor:
         unique_filename = f"{uuid.uuid4().hex}{file_extension}"
         object_name = f"{folder}/{unique_filename}"
 
-        print(f"☁️ 准备将图像上传至 OSS (启用跨国分片多线程加速)...")
-
-        # 🚀 修复 Bug 1: 修正参数名为 description
+        print(f"☁️ 准备上传至 OSS: {object_name}")
         tracker = OSSProgressTracker(description=f"上传 {os.path.basename(local_file_path)}")
 
         try:
-            # 🚀 核心抗延迟升级：分片断点续传
-            # 只要文件大于 100KB，就自动切分，开启 3 个线程并发传
+            # 分片断点续传上传
             oss2.resumable_upload(
                 self.bucket,
                 object_name,
                 local_file_path,
-                multipart_threshold=100 * 1024,  # 100KB 以上触发分片
-                part_size=100 * 1024,  # 每个切片 100KB
-                num_threads=3,  # 3线程并发上传
+                multipart_threshold=100 * 1024,
+                part_size=100 * 1024,
+                num_threads=3,
                 progress_callback=tracker
             )
+            print(f"\n✅ 文件上传成功: {object_name}")
 
-            signed_url = self.bucket.sign_url('GET', object_name, 3600)
-            print(f"\n✅ 上传成功！获取临时访问链接。")
-            print(signed_url)
-            return signed_url
+            # 🔑 关键 1: 设置为公共读权限（让 DashScope 能直接访问）
+            if make_public:
+                self.bucket.put_object_acl(object_name, oss2.OBJECT_ACL_PUBLIC_READ)
+                print("🔓 已设置对象为公共读权限")
+
+            # 🔑 关键 2: 返回公开永久链接（非签名链接）
+            public_url = self._build_public_url(object_name)
+            print(f"🌐 公开访问链接: {public_url}")
+
+            return public_url
 
         except oss2.exceptions.RequestError as e:
-            raise RuntimeError(f"❌ 上传网络异常，请检查代理设置或网络状态: {e}")
+            raise RuntimeError(f"❌ 上传网络异常: {e}")
+        except oss2.exceptions.OssError as e:
+            raise RuntimeError(f"❌ OSS 服务错误: {e.code} - {e.message}")
