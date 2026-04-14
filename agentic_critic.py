@@ -268,37 +268,19 @@ class AgenticImageEditor:
 
     def edit_image(self, image_url, prompt, mask_url=None):
         print(f"\n🎨 [生成] 调用 {self.edit_model}...")
-        messages = [
-            {
-                "role": "user",
-                "content": [
-                    {"image": image_url},
-                    {"text": prompt.strip()}
-                ]
-            }
-        ]
-        api_key = os.getenv("DASHSCOPE_API_KEY")
-        response = MultiModalConversation.call(
-            api_key=api_key,
-            model=self.edit_model,
-            messages=messages,
-            stream=False,
-            n=1,
-            watermark=False,
-            negative_prompt="deformed torso, changing existing limb angles, distorted joints, redrawing entire person, extra fingers, anatomical nonsense, missing limbs",
-            prompt_extend=False,  # ⚠️ 强烈建议设为 False，防止大模型魔改我们严苛的硬编码 prompt
-        )
-        if response.status_code == 200:
-            # 遍历 content 寻找包含 'image' 的字典
-            for content in response.output.choices[0].message.content:
-                if 'image' in content:
-                    result_url = content['image']
-                    print(f"✅ 生成成功，URL: {result_url}")
-                    return result_url
-            raise RuntimeError("❌ API 返回成功，但未在响应中找到图像 URL。")
-        else:
-            error_msg = f"HTTP返回码：{response.status_code}, 错误码：{response.code}, 错误信息：{response.message}"
-            raise RuntimeError(f"❌ 图像生成失败: {error_msg}")
+        params = {
+            "model": self.edit_model,
+            "prompt": prompt.strip(),
+            "input_image_url": image_url,
+            "negative_prompt": "deformed torso, changing existing limb angles, distorted joints, redrawing entire person, extra fingers, anatomical nonsense, missing limbs",
+            "seed": 42
+        }
+        if mask_url:
+            params["mask_url"] = mask_url
+
+        # 兼容不同模型的调用类
+        resp = ImageSynthesis.call(**params)
+        return self._wait_for_task(resp)
 
     def evaluate_image(self, original_url, current_url, original_prompt):
         print(f"\n🔍 [评估] 调用 {self.eval_model} 进行视觉审视...")

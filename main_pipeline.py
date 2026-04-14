@@ -8,7 +8,7 @@ import argparse
 from PIL import Image
 
 from pose_extractor import PoseExtractor, read_kpts_annotation
-from image_ops import ImageProcessor
+from image_ops import OSSProcessor
 from agentic_critic import AgenticImageEditor, GeometricRefinerAgent
 from reconstruction_3d import ReconstructionEngine
 from sam2_coco import segment_subject
@@ -61,7 +61,7 @@ def main(args):
     kpts_orig = read_kpts_annotation(args.img, args.annotation_file)
     sam2_img_path = segment_subject(args.img, kpts_orig)
 
-    base64_img = ImageProcessor.encode_to_base64(sam2_img_path)
+    image_url = OSSProcessor().upload_and_get_url(local_file_path=sam2_img_path)
 
     # ==========================================
     # 4. Agentic Loop (生成 -> Critic -> 再生成)
