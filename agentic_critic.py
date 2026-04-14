@@ -6,7 +6,7 @@ import time
 
 import requests
 import dashscope
-from dashscope import ImageSynthesis, MultiModalConversation
+from dashscope import MultiModalConversation
 import numpy as np
 
 from auto_param_builder import AutoParamBuilder
@@ -148,33 +148,52 @@ class GeometricRefinerAgent:
         3. Maintain photorealistic skin texture and clothing continuity.
         """
 
-    def _wait_for_task(self, response):
-        if response.status_code != 200:
-            raise RuntimeError(f"❌ 编辑任务提交失败: {response.message}")
-        task_id = response.output.task_id
-        for _ in range(30):
-            time.sleep(2)
-            check = ImageSynthesis.fetch(task_id=task_id)
-            if check.output.task_status == 'SUCCEEDED':
-                return check.output.results[0].url
-            elif check.output.task_status in ['FAILED', 'CANCELED']:
-                raise RuntimeError(f"❌ 图像微调失败: {check.message}")
-        raise RuntimeError("⏳ 图像微调超时")
-
     def edit_image(self, image_url, prompt, mask_url=None):
-        params = {
-            "model": self.edit_model,
-            "prompt": prompt.strip(),
-            "input_image_url": image_url,
-            "negative_prompt": "shifting torso, changing joint angles, redrawing background, missing limbs",
-            "seed": 42
-        }
-        if mask_url: params["mask_url"] = mask_url
+        print(f"\n🎨 [生成] 调用 {self.edit_model} (同步对话模式)...")
 
+        # 1. 组装新版 API 要求的 messages 结构
+        messages = [
+            {
+                "role": "user",
+                "content": [
+                    {"image": image_url},
+                    {"text": prompt.strip()}
+                ]
+            }
+        ]
 
-        resp = ImageSynthesis.call(**params)
+        # 如果有 mask_url，按顺序插入到 text 前面
+        if mask_url:
+            messages[0]["content"].insert(1, {"image": mask_url})
 
-        return self._wait_for_task(resp)
+        try:
+            # 2. 发起同步调用 (自动等待直到图片生成完毕)
+            response = MultiModalConversation.call(
+                api_key=os.getenv("DASHSCOPE_API_KEY"),
+                model=self.edit_model,
+                messages=messages,
+                stream=False,
+                n=1,
+                watermark=False,
+                # 完整保留你精简版的负向提示词
+                negative_prompt="shifting torso, changing joint angles, redrawing background, missing limbs",
+                # 强烈建议设为 False，防止大模型魔改你的 prompt
+                prompt_extend=False
+            )
+
+            # 3. 提取返回的干净 URL
+            if response.status_code == 200:
+                for content in response.output.choices[0].message.content:
+                    if 'image' in content:
+                        result_url = content['image']
+                        return result_url
+                raise RuntimeError("❌ API 返回了 200，但未找到图片链接。")
+            else:
+                error_msg = f"HTTP返回码：{response.status_code}, 错误信息：{response.message}"
+                raise RuntimeError(f"❌ 图像生成失败: {error_msg}")
+
+        except Exception as e:
+            raise RuntimeError(f"❌ 大模型 API 调用崩溃: {str(e)}")
 
     def run(self, original_url, initial_gen_url, mask_url=None):
         """
@@ -251,36 +270,54 @@ class AgenticImageEditor:
         - Seamlessly match original skin texture, lighting, and clothing style.
         """
 
-    def _wait_for_task(self, response):
-        if response.status_code != 200:
-            raise RuntimeError(f"❌ 编辑任务提交失败: {response.message}")
-        task_id = response.output.task_id
-        print(f"🔄 图像生成任务已提交 (ID: {task_id})")
-
-        for _ in range(30):  # 最多等待60秒
-            time.sleep(2)
-            check = ImageSynthesis.fetch(task_id=task_id)
-            if check.output.task_status == 'SUCCEEDED':
-                return check.output.results[0].url
-            elif check.output.task_status in ['FAILED', 'CANCELED']:
-                raise RuntimeError(f"❌ 图像生成失败: {check.message}")
-        raise RuntimeError("⏳ 图像生成超时")
-
     def edit_image(self, image_url, prompt, mask_url=None):
-        print(f"\n🎨 [生成] 调用 {self.edit_model}...")
-        params = {
-            "model": self.edit_model,
-            "prompt": prompt.strip(),
-            "input_image_url": image_url,
-            "negative_prompt": "deformed torso, changing existing limb angles, distorted joints, redrawing entire person, extra fingers, anatomical nonsense, missing limbs",
-            "seed": 42
-        }
-        if mask_url:
-            params["mask_url"] = mask_url
+        print(f"\n🎨 [生成] 调用 {self.edit_model} (同步对话模式)...")
 
-        # 兼容不同模型的调用类
-        resp = ImageSynthesis.call(**params)
-        return self._wait_for_task(resp)
+        # 1. 组装符合新版 API 要求的 messages 结构
+        messages = [
+            {
+                "role": "user",
+                "content": [
+                    {"image": image_url},
+                    {"text": prompt.strip()}
+                ]
+            }
+        ]
+
+        # 如果有 mask_url，也塞进 content 列表里
+        if mask_url:
+            messages[0]["content"].insert(1, {"image": mask_url})
+
+        try:
+            # 2. 发起同步调用 (程序会在这里耐心等待，直到阿里云把图画完)
+            response = MultiModalConversation.call(
+                api_key=os.getenv("DASHSCOPE_API_KEY"),
+                model=self.edit_model,
+                messages=messages,
+                stream=False,
+                n=1,
+                watermark=False,
+                # 你的负向提示词完整保留
+                negative_prompt="deformed torso, changing existing limb angles, distorted joints, redrawing entire person, extra fingers, anatomical nonsense, missing limbs",
+                # 强烈建议设为 False，防止模型自己乱加词破坏你的严苛医学约束
+                prompt_extend=False
+            )
+
+            # 3. 解析并返回干净的 URL
+            if response.status_code == 200:
+                for content in response.output.choices[0].message.content:
+                    if 'image' in content:
+                        result_url = content['image']
+                        print(f"✅ 生成成功，新图像 URL: {result_url}")
+                        return result_url
+                raise RuntimeError("❌ API 返回了 200 成功，但内容里没有图片链接。")
+            else:
+                error_msg = f"HTTP返回码：{response.status_code}, 错误信息：{response.message}"
+                raise RuntimeError(f"❌ 图像生成失败: {error_msg}")
+
+        except Exception as e:
+            # 捕获底层的网络断连、超时等异常，直接抛出清晰的报错
+            raise RuntimeError(f"❌ 大模型 API 调用崩溃: {str(e)}")
 
     def evaluate_image(self, original_url, current_url, original_prompt):
         print(f"\n🔍 [评估] 调用 {self.eval_model} 进行视觉审视...")
