@@ -7,7 +7,6 @@ import cv2
 import argparse
 from PIL import Image
 
-import config
 from pose_extractor import PoseExtractor, read_kpts_annotation
 from image_ops import ImageProcessor
 from agentic_critic import AgenticImageEditor, GeometricRefinerAgent
@@ -20,7 +19,6 @@ def parse_args():
 
     # 基础输入参数
     parser.add_argument('--img', type=str,
-                        default=os.path.join(config.DATA_DIR, "test_amputee.jpg"),
                         help='Path to the input image')
 
     # PoseExtractor 参数 (必填或提供默认路径)
@@ -37,6 +35,7 @@ def parse_args():
                         default='./data/ldpose_train_25kpts.json',
                         help='Path to the annotation file (optional)')
     parser.add_argument('--image_save_dir', type=str)
+    parser.add_argument('--mesh_save_dir', type=str)
 
     return parser.parse_args()
 
@@ -101,7 +100,7 @@ def main(args):
         # 4. 执行 3D 恢复
         # 注意: 这里的 args.img 可能依然是你最开始的本地路径，用于提取基础文件名
         base_name = os.path.basename(args.img).split('.')[0]
-        mesh_save_path = os.path.join(config.OUTPUT_MESH_DIR, f"{base_name}_mesh.obj")
+        mesh_save_path = os.path.join(args.mesh_save_dir, f"{base_name}_mesh.obj")
 
         reconstructor.predict_mesh(img_pil, mesh_save_path)
         print(f"✅ 3D Mesh 已保存至: {mesh_save_path}")
