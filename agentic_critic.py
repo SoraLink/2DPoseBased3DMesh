@@ -354,6 +354,11 @@ class AgenticImageEditor:
             raise RuntimeError(f"❌ VLM 评估失败: {resp.message}")
 
         content = resp.output.choices[0].message.content
+
+        if isinstance(content, list):
+            text_parts = [item['text'] for item in content if 'text' in item]
+            content = "".join(text_parts)
+
         # 清洗可能混入的思考标签或 Markdown
         match = re.search(r'\{.*\}', content, re.DOTALL)
         if match:
