@@ -4,6 +4,7 @@ import base64
 import mimetypes
 
 from dotenv import load_dotenv
+from tqdm import tqdm
 
 
 class ImageProcessor:
@@ -82,43 +83,78 @@ import os
 import uuid
 load_dotenv()
 
+
+class OSSProgressTracker:
+    """用于 OSS 上传的终端进度条回调类"""
+
+    def __init__(self, description="上传中"):
+        self.pbar = None
+        self.description = description
+
+    def __call__(self, consumed_bytes, total_bytes):
+        if total_bytes:
+            if self.pbar is None:
+                self.pbar = tqdm(total=total_bytes, unit='B', unit_scale=True, desc=self.description)
+            self.pbar.update(consumed_bytes - self.pbar.n)
+            if consumed_bytes == total_bytes:
+                self.pbar.close()
+
+
 class OSSProcessor:
     def __init__(self):
-        # 强烈建议将这些敏感信息配置在操作系统的环境变量中
-        self.access_key_id = os.getenv('OSS_ACCESS_KEY_ID', '你的AccessKeyId')
-        self.access_key_secret = os.getenv('OSS_ACCESS_KEY_SECRET', '你的AccessKeySecret')
-        # Endpoint 示例：'oss-cn-beijing.aliyuncs.com'
-        self.endpoint = os.getenv('OSS_ENDPOINT', '你的Endpoint')
-        self.bucket_name = os.getenv('OSS_BUCKET_NAME', '你的Bucket名称')
+        self.access_key_id = os.getenv('OSS_ACCESS_KEY_ID')
+        self.access_key_secret = os.getenv('OSS_ACCESS_KEY_SECRET')
+        self.endpoint = os.getenv('OSS_ENDPOINT')
+        self.bucket_name = os.getenv('OSS_BUCKET_NAME')
 
-        # 校验配置
         if not all([self.access_key_id, self.access_key_secret, self.endpoint, self.bucket_name]):
             raise ValueError("❌ OSS 环境变量未配置完整，请检查。")
 
-        # 初始化认证和 Bucket 实例
         self.auth = oss2.Auth(self.access_key_id, self.access_key_secret)
-        self.bucket = oss2.Bucket(self.auth, self.endpoint, self.bucket_name)
+
+        # 🚀 修复 Bug 2: 阿里云 SDK 配置超时的正确姿势
+        oss2.defaults.connect_timeout = 60  # 放大握手超时时间
+        oss2.defaults.request_retries = 5  # 放大请求失败的自动重试次数
+
+        # 因为后续要开多线程分片上传，需将连接池调大以防阻塞
+        session = oss2.Session(pool_size=10)
+
+        self.bucket = oss2.Bucket(
+            self.auth,
+            self.endpoint,
+            self.bucket_name,
+            session=session
+        )
 
     def upload_and_get_url(self, local_file_path, folder="agent_images"):
-        """
-        上传本地文件到 OSS 并返回带签名的临时访问 URL。
-        """
         if not os.path.exists(local_file_path):
             raise FileNotFoundError(f"❌ 找不到要上传的文件: {local_file_path}")
 
-        # 1. 生成云端唯一的文件名 (防止同名文件覆盖)
         file_extension = os.path.splitext(local_file_path)[1]
         unique_filename = f"{uuid.uuid4().hex}{file_extension}"
         object_name = f"{folder}/{unique_filename}"
 
-        # 2. 执行上传
-        print(f"☁️ 正在将图像上传至 OSS: {object_name} ...")
-        self.bucket.put_object_from_file(object_name, local_file_path)
+        print(f"☁️ 准备将图像上传至 OSS (启用跨国分片多线程加速)...")
 
-        # 3. 生成带签名的访问 URL (有效时间 3600 秒 = 1小时)
-        # 这样做的好处是：你的 Bucket 可以保持"私有"读写权限，极其安全，
-        # 同时大模型 API 也能通过这个临时 URL 顺利拉取到图片。
-        signed_url = self.bucket.sign_url('GET', object_name, 3600)
+        # 🚀 修复 Bug 1: 修正参数名为 description
+        tracker = OSSProgressTracker(description=f"上传 {os.path.basename(local_file_path)}")
 
-        print(f"✅ 上传成功！获取临时访问链接。")
-        return signed_url
+        try:
+            # 🚀 核心抗延迟升级：分片断点续传
+            # 只要文件大于 100KB，就自动切分，开启 3 个线程并发传
+            oss2.resumable_upload(
+                self.bucket,
+                object_name,
+                local_file_path,
+                multipart_threshold=100 * 1024,  # 100KB 以上触发分片
+                part_size=100 * 1024,  # 每个切片 100KB
+                num_threads=3,  # 3线程并发上传
+                progress_callback=tracker
+            )
+
+            signed_url = self.bucket.sign_url('GET', object_name, 3600)
+            print(f"\n✅ 上传成功！获取临时访问链接。")
+            return signed_url
+
+        except oss2.exceptions.RequestError as e:
+            raise RuntimeError(f"❌ 上传网络异常，请检查代理设置或网络状态: {e}")
