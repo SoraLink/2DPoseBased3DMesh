@@ -23,10 +23,10 @@ def parse_args():
 
     # PoseExtractor 参数 (必填或提供默认路径)
     parser.add_argument('--pose_config', type=str,
-                        default='.models/pose/vit_config.py',
+                        default='./models/pose/vit_config.py',
                         help='Path to the LDPose MMPose config file')
     parser.add_argument('--pose_ckpt', type=str,
-                        default='.models/pose/epoch_1.pth',
+                        default='./models/pose/epoch_1.pth',
                         help='Path to the LDPose checkpoint file')
     parser.add_argument('--device', type=str,
                         default='cuda:0',

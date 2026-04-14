@@ -6,7 +6,7 @@ import time
 
 import requests
 import dashscope
-from dashscope import ImageSynthesis, MultiModalConversation, ImageEdit
+from dashscope import ImageSynthesis, MultiModalConversation
 import numpy as np
 
 from auto_param_builder import AutoParamBuilder
@@ -171,10 +171,9 @@ class GeometricRefinerAgent:
         }
         if mask_url: params["mask_url"] = mask_url
 
-        try:
-            resp = ImageSynthesis.call(**params)
-        except Exception:
-            resp = ImageEdit.call(**params)
+
+        resp = ImageSynthesis.call(**params)
+
         return self._wait_for_task(resp)
 
     def run(self, original_url, initial_gen_url, mask_url=None):
@@ -269,6 +268,7 @@ class AgenticImageEditor:
 
     def edit_image(self, image_url, prompt, mask_url=None):
         print(f"\n🎨 [生成] 调用 {self.edit_model}...")
+        print(image_url)
         params = {
             "model": self.edit_model,
             "prompt": prompt.strip(),
@@ -280,13 +280,7 @@ class AgenticImageEditor:
             params["mask_url"] = mask_url
 
         # 兼容不同模型的调用类
-        try:
-            resp = ImageSynthesis.call(**params)
-        except Exception:
-            # 部分图像模型需使用 ImageEdit.call
-            from dashscope import ImageEdit
-            resp = ImageEdit.call(**params)
-
+        resp = ImageSynthesis.call(**params)
         return self._wait_for_task(resp)
 
     def evaluate_image(self, original_url, current_url, original_prompt):
@@ -345,12 +339,9 @@ class AgenticImageEditor:
             print(f"\n{'=' * 40} 第 {i}/{self.max_iterations} 轮 {'=' * 40}")
 
             # 1. 执行编辑
-            try:
-                current_url = self.edit_image(image_url, current_prompt, mask_url)
-                generated_image_urls.append(current_url)
-            except Exception as e:
-                print(f"❌ 编辑中断: {e}")
-                break
+            current_url = self.edit_image(current_url, current_prompt, mask_url)
+            generated_image_urls.append(current_url)
+
 
             # 2. 自我审视（最后一轮直接返回）
             if i < self.max_iterations:

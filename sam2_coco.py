@@ -33,7 +33,7 @@ def segment_subject(image_path, keypoints):
         if v > 0:
             points_coords.append([x, y])
 
-    input_points = np.array(keypoints)
+    input_points = np.array(points_coords)
     input_labels = np.ones(len(input_points))
 
     print(f"成功提取 {len(input_points)} 个有效关键点坐标。")
