@@ -69,10 +69,10 @@ def main(args):
     save_dir = args.image_save_dir
     if not os.path.exists(save_dir):
         save_dir = time.time()
-    generated_image_urls = image_editor.run(base64_img)
+    generated_image_urls = image_editor.run(image_url)
     last_generated_image_url = generated_image_urls[-1]
     save_image_from_url(generated_image_urls, "image_editor", save_dir)
-    generated_image_urls = geometric_refiner.run(base64_img, last_generated_image_url)
+    generated_image_urls = geometric_refiner.run(image_url, last_generated_image_url)
     save_image_from_url(generated_image_urls, "geometric_refiner", save_dir)
     final_image_url = generated_image_urls[-1]
 

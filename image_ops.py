@@ -154,6 +154,7 @@ class OSSProcessor:
 
             signed_url = self.bucket.sign_url('GET', object_name, 3600)
             print(f"\n✅ 上传成功！获取临时访问链接。")
+            print(signed_url)
             return signed_url
 
         except oss2.exceptions.RequestError as e:
