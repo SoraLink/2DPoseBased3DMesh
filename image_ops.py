@@ -3,6 +3,8 @@ import numpy as np
 import base64
 import mimetypes
 
+from dotenv import load_dotenv
+
 
 class ImageProcessor:
     @staticmethod
@@ -78,7 +80,7 @@ class ImageProcessor:
 import oss2
 import os
 import uuid
-
+load_dotenv()
 
 class OSSProcessor:
     def __init__(self):
