@@ -9,8 +9,105 @@ from dashscope import MultiModalConversation
 import numpy as np
 
 from auto_param_builder import AutoParamBuilder
+from image_ops import OSSProcessor
 from pose_extractor import PoseExtractor
 
+METAINFO = {
+    'dataset_name': 'ld_pros_pose',
+    'classes': ('person',),
+    'num_keypoints': 31,
+    # === 1. 关键点定义 (完全对应截图) ===
+    'keypoint_info': {
+        # --- Part A: COCO 原生 17 点 (ID 0-16) ---
+        0: dict(name='nose', id=0, color=[51, 153, 255], type='upper', swap=''),
+        1: dict(name='left_eye', id=1, color=[51, 153, 255], type='upper', swap='right_eye'),
+        2: dict(name='right_eye', id=2, color=[51, 153, 255], type='upper', swap='left_eye'),
+        3: dict(name='left_ear', id=3, color=[51, 153, 255], type='upper', swap='right_ear'),
+        4: dict(name='right_ear', id=4, color=[51, 153, 255], type='upper', swap='left_ear'),
+        5: dict(name='left_shoulder', id=5, color=[0, 255, 0], type='upper', swap='right_shoulder'),
+        6: dict(name='right_shoulder', id=6, color=[255, 128, 0], type='upper', swap='left_shoulder'),
+        7: dict(name='left_elbow', id=7, color=[0, 255, 0], type='upper', swap='right_elbow'),
+        8: dict(name='right_elbow', id=8, color=[255, 128, 0], type='upper', swap='left_elbow'),
+        9: dict(name='left_wrist', id=9, color=[0, 255, 0], type='upper', swap='right_wrist'),
+        10: dict(name='right_wrist', id=10, color=[255, 128, 0], type='upper', swap='left_wrist'),
+        11: dict(name='left_hip', id=11, color=[0, 255, 0], type='lower', swap='right_hip'),
+        12: dict(name='right_hip', id=12, color=[255, 128, 0], type='lower', swap='left_hip'),
+        13: dict(name='left_knee', id=13, color=[0, 255, 0], type='lower', swap='right_knee'),
+        14: dict(name='right_knee', id=14, color=[255, 128, 0], type='lower', swap='left_knee'),
+        15: dict(name='left_ankle', id=15, color=[0, 255, 0], type='lower', swap='right_ankle'),
+        16: dict(name='right_ankle', id=16, color=[255, 128, 0], type='lower', swap='left_ankle'),
+
+        # --- Part B: 自定义残肢/假肢点 (ID 17-24) ---
+        17: dict(name='L_Middle_Tip', id=17, color=[255, 0, 255], type='upper', swap='R_Middle_Tip'),
+        18: dict(name='R_Middle_Tip', id=18, color=[255, 0, 255], type='upper', swap='L_Middle_Tip'),
+        19: dict(name='L_Heel', id=19, color=[255, 0, 255], type='lower', swap='R_Heel'),
+        20: dict(name='R_Heel', id=20, color=[255, 0, 255], type='lower', swap='L_Heel'),
+        21: dict(name='L_Toe_Tip', id=21, color=[255, 0, 255], type='lower', swap='R_Toe_Tip'),
+        22: dict(name='R_Toe_Tip', id=22, color=[255, 0, 255], type='lower', swap='L_Toe_Tip'),
+
+        # 23-30: 残肢点 (Res KPs)
+        23: dict(name='L-Elbow-Res-Above', id=23, color=[255, 0, 0], type='upper', swap='R-Elbow-Res-Above'),
+        24: dict(name='R-Elbow-Res-Above', id=24, color=[255, 0, 0], type='upper', swap='L-Elbow-Res-Above'),
+        25: dict(name='L-Elbow-Res-Below', id=25, color=[255, 0, 0], type='upper', swap='R-Elbow-Res-Below'),
+        26: dict(name='R-Elbow-Res-Below', id=26, color=[255, 0, 0], type='upper', swap='L-Elbow-Res-Below'),
+        27: dict(name='L-Knee-Res-Above', id=27, color=[255, 0, 0], type='lower', swap='R-Knee-Res-Above'),
+        28: dict(name='R-Knee-Res-Above', id=28, color=[255, 0, 0], type='lower', swap='L-Knee-Res-Above'),
+        29: dict(name='L-Knee-Res-Below', id=29, color=[255, 0, 0], type='lower', swap='R-Knee-Res-Below'),
+        30: dict(name='R-Knee-Res-Below', id=30, color=[255, 0, 0], type='lower', swap='L-Knee-Res-Below'),
+    },
+
+    # === 2. 骨架连接 (根据 ID 和解剖逻辑推导) ===
+    'skeleton_info': {
+        # --- Part A: 基础连线 (0-16 为原生或基础结构) ---
+        0: dict(link=('nose', 'left_eye'), id=0, color=[51, 153, 255]),
+        1: dict(link=('nose', 'right_eye'), id=1, color=[51, 153, 255]),
+        2: dict(link=('left_eye', 'left_ear'), id=2, color=[51, 153, 255]),
+        3: dict(link=('right_eye', 'right_ear'), id=3, color=[51, 153, 255]),
+        4: dict(link=('left_shoulder', 'right_shoulder'), id=4, color=[51, 153, 255]),
+        5: dict(link=('left_shoulder', 'left_elbow'), id=5, color=[0, 255, 0]),
+        6: dict(link=('left_elbow', 'left_wrist'), id=6, color=[0, 255, 0]),
+        7: dict(link=('right_shoulder', 'right_elbow'), id=7, color=[255, 128, 0]),
+        8: dict(link=('right_elbow', 'right_wrist'), id=8, color=[255, 128, 0]),
+        9: dict(link=('left_shoulder', 'left_hip'), id=9, color=[51, 153, 255]),
+        10: dict(link=('right_shoulder', 'right_hip'), id=10, color=[51, 153, 255]),
+        11: dict(link=('left_hip', 'right_hip'), id=11, color=[51, 153, 255]),
+        12: dict(link=('left_hip', 'left_knee'), id=12, color=[0, 255, 0]),
+        13: dict(link=('left_knee', 'left_ankle'), id=13, color=[0, 255, 0]),
+        14: dict(link=('right_hip', 'right_knee'), id=14, color=[255, 128, 0]),
+        15: dict(link=('right_knee', 'right_ankle'), id=15, color=[255, 128, 0]),
+
+        # --- Part B: 新增点连线 (17-22: 肢体末端) ---
+        16: dict(link=('left_wrist', 'L_Middle_Tip'), id=16, color=[0, 255, 255]),
+        17: dict(link=('right_wrist', 'R_Middle_Tip'), id=17, color=[255, 0, 255]),
+        18: dict(link=('left_ankle', 'L_Heel'), id=18, color=[0, 255, 255]),
+        19: dict(link=('left_ankle', 'L_Toe_Tip'), id=19, color=[0, 255, 255]),
+        20: dict(link=('right_ankle', 'R_Heel'), id=20, color=[255, 0, 255]),
+        21: dict(link=('right_ankle', 'R_Toe_Tip'), id=21, color=[255, 0, 255]),
+
+        # --- Part C: 残肢连线 (23-30: 对应 RES_KPS) ---
+        22: dict(link=('left_shoulder', 'L-Elbow-Res-Above'), id=22, color=[255, 0, 0]),
+        23: dict(link=('right_shoulder', 'R-Elbow-Res-Above'), id=23, color=[255, 0, 0]),
+        24: dict(link=('left_elbow', 'L-Elbow-Res-Below'), id=24, color=[255, 0, 0]),
+        25: dict(link=('right_elbow', 'R-Elbow-Res-Below'), id=25, color=[255, 0, 0]),
+        26: dict(link=('left_hip', 'L-Knee-Res-Above'), id=26, color=[255, 0, 0]),
+        27: dict(link=('right_hip', 'R-Knee-Res-Above'), id=27, color=[255, 0, 0]),
+        28: dict(link=('left_knee', 'L-Knee-Res-Below'), id=28, color=[255, 0, 0]),
+        29: dict(link=('right_knee', 'R-Knee-Res-Below'), id=29, color=[255, 0, 0]),
+    },
+
+    # === 3. 翻转时对应的 ID 列表 ===
+    # 这个列表非常关键，MMPose 训练时 Flip 增强就是靠这个 list 知道谁和谁互换
+    # 格式：[1.0] * 25
+    'joint_weights': [1.] * 31,
+
+    # Sigma (用于 OKS 计算)，给自定义点一个默认值 0.05
+    'sigmas': [
+        0.026, 0.025, 0.025, 0.035, 0.035, 0.079, 0.079, 0.072, 0.072,
+        0.062, 0.062, 0.107, 0.107, 0.087, 0.087, 0.089, 0.089,
+        0.089, 0.089, 0.089, 0.089, 0.089, 0.089,
+        0.072, 0.072, 0.062, 0.062, 0.087, 0.087, 0.089, 0.089
+    ],
+}
 
 def debug_visualize_alignment(kpts_orig, kpts_aligned, save_dir="./debug"):
     """
@@ -36,6 +133,68 @@ def debug_visualize_alignment(kpts_orig, kpts_aligned, save_dir="./debug"):
     save_path = os.path.join(save_dir, f"align_{int(time.time())}.jpg")
     cv2.imwrite(save_path, canvas)
     print(f"👁️ [Debug] 点位对比图已保存至: {save_path} (蓝:原图, 红:对齐后)")
+
+
+def draw_pose_skeleton(kpts, save_dir="./debug_skeletons", img_shape=(1024, 1024, 3)):
+    """
+    根据 METAINFO 字典自动绘制连线和关键点，支持自定义颜色。
+    """
+    os.makedirs(save_dir, exist_ok=True)
+    canvas = np.zeros(img_shape, dtype=np.uint8)
+
+    # 1. 建立名字到索引的映射字典 (例如：{'nose': 0, 'left_eye': 1, ...})
+    name_to_id = {info['name']: info['id'] for info in METAINFO['keypoint_info'].values()}
+
+    # 2. 遍历 skeleton_info，绘制连线
+    for skel_id, skel_info in METAINFO['skeleton_info'].items():
+        name1, name2 = skel_info['link']
+
+        # 确保这两个名字在我们的关键点定义里
+        if name1 in name_to_id and name2 in name_to_id:
+            p1_idx = name_to_id[name1]
+            p2_idx = name_to_id[name2]
+
+            # 确保索引没有越界
+            if p1_idx < len(kpts) and p2_idx < len(kpts):
+                p1, p2 = kpts[p1_idx], kpts[p2_idx]
+
+                # 过滤不可见点 (v=0)
+                if (len(p1) >= 3 and p1[2] == 0) or (len(p2) >= 3 and p2[2] == 0):
+                    continue
+
+                pt1 = (int(p1[0]), int(p1[1]))
+                pt2 = (int(p2[0]), int(p2[1]))
+
+                # 提取 RGB 颜色并转换为 OpenCV 用的 BGR
+                r, g, b = skel_info['color']
+                color_bgr = (int(b), int(g), int(r))
+
+                # 画线
+                cv2.line(canvas, pt1, pt2, color_bgr, 4)
+
+    # 3. 遍历 keypoint_info，绘制点 (盖在连线上面)
+    for kp_id, kp_info in METAINFO['keypoint_info'].items():
+        if kp_id < len(kpts):
+            pt = kpts[kp_id]
+
+            # 过滤不可见点
+            if len(pt) >= 3 and pt[2] == 0:
+                continue
+
+            pos = (int(pt[0]), int(pt[1]))
+
+            # 提取 RGB 颜色并转换为 BGR
+            r, g, b = kp_info['color']
+            color_bgr = (int(b), int(g), int(r))
+
+            # 画点
+            cv2.circle(canvas, pos, 6, color_bgr, -1)
+
+    # 保存图片
+    filename = f"target_skeleton_{int(time.time() * 1000)}.jpg"
+    local_path = os.path.join(save_dir, filename)
+    cv2.imwrite(local_path, canvas)
+    return os.path.abspath(local_path)
 
 class PoseGeometricEvaluator:
     def __init__(self, displacement_threshold=15.0, angle_threshold_deg=10.0):
@@ -116,96 +275,109 @@ class PoseGeometricEvaluator:
 
         # 如果有静止点发生偏移
         if displaced_joints:
-            # 按偏移量从大到小排序，让模型优先关注偏得最厉害的点
-            displaced_joints.sort(key=lambda x: x[1], reverse=True)
-
-            # [注意] key 现在是数字(int)，拼接字符串时需要用 str(k)
-            joint_details = ", ".join([f"'Joint {k}' ({d:.1f}px)" for k, d in displaced_joints])
+            # 仅作控制台日志用
             joint_names = ", ".join([str(k) for k, d in displaced_joints])
-
-            error_reasons.append(
-                f"[Displacement] The following joints moved beyond the {self.disp_thresh}px threshold: {joint_details}.")
-            correction_steps.append(
-                f"Lock the exact positions of these joints: {joint_names}. DO NOT shift the torso or original body parts.")
+            error_reasons.append(f"Joints offset > {self.disp_thresh}px: {joint_names}")
 
         # ---------------------------------------------------------
         # 2. 检查残肢生成角度 (带相对方向提示)
         # ---------------------------------------------------------
         for res_vec_keys, gen_vec_keys in zip(residual_vecs_list, generated_vecs_list):
-            # [注意] 同样必须切片 [:2] 提取二维向量，抛弃第三维度的置信度
             v_res = kpts_orig[res_vec_keys[1]][:2] - kpts_orig[res_vec_keys[0]][:2]
             v_gen = kpts_aligned[gen_vec_keys[1]][:2] - kpts_aligned[gen_vec_keys[0]][:2]
-
             angle_diff = self.calculate_vector_angle(v_res, v_gen)
 
             if angle_diff > self.angle_thresh:
-                # 向量叉乘计算相对旋转方向
-                cross_product = v_res[0] * v_gen[1] - v_res[1] * v_gen[0]
-                direction_hint = "counter-clockwise" if cross_product > 0 else "clockwise"
+                error_reasons.append(f"Angle error {angle_diff:.1f}° on limb {gen_vec_keys}")
 
-                error_reasons.append(
-                    f"[Angle Error on Joints {gen_vec_keys}] Generated limb deviated by {angle_diff:.1f} degrees.")
-                correction_steps.append(
-                    f"The limb connected to joint {gen_vec_keys[0]} is pointing incorrectly. Rotate it slightly {direction_hint}.")
-
-        # ---------------------------------------------------------
-        # 3. 结果汇总打包
-        # ---------------------------------------------------------
+            # 返回结果 (干掉 correction)
         if not error_reasons:
-            return {"passed": True, "reason": "Geometric alignment perfect.", "correction": ""}
+            return {"passed": True, "reason": "Geometric alignment perfect."}
         else:
-            formatted_reasons = "\n".join([f"- {r}" for r in error_reasons])
-            formatted_corrections = "\n".join([f"Task {i + 1}: {c}" for i, c in enumerate(correction_steps)])
-            return {
-                "passed": False,
-                "reason": f"Multiple geometric errors detected:\n{formatted_reasons}",
-                "correction": f"Please fix ALL the following issues simultaneously:\n{formatted_corrections}"
-            }
+            formatted_reasons = " | ".join(error_reasons)
+            return {"passed": False, "reason": f"Errors: {formatted_reasons}"}
 
 # ==========================================
 # 2. 精细校准 Agent (专职处理第二阶段)
 # ==========================================
 class GeometricRefinerAgent:
-    def __init__(self, pose_extractor: PoseExtractor, edit_model='qwen-image-2.0-pro', disp_thresh=15.0, angle_thresh=10.0, max_iterations=3):
+    def __init__(self, pose_extractor, edit_model='qwen-image-2.0-pro', disp_thresh=15.0, angle_thresh=10.0,
+                 max_iterations=3):
         self.edit_model = edit_model
         self.max_iterations = max_iterations
-        self.evaluator = PoseGeometricEvaluator(disp_thresh, angle_thresh)
 
+        self.evaluator = PoseGeometricEvaluator(disp_thresh, angle_thresh)
         self.pose_extractor = pose_extractor
         self.auto_param_builder = AutoParamBuilder()
 
+        # 实例化你的 OSS 处理器
+        self.oss_processor = OSSProcessor()
 
-        # 精细微调的专用基础指令（更强调几何校准）
+        # 精细微调的专用基础指令（强调用第二张图作为骨架参考）
         self.refine_instruction = """
         [Task: Geometric Limb Calibration]
-        Objective: Micro-adjust the posture of the newly generated limb in the provided image.
+        Objective: Micro-adjust the posture of the newly generated limb in the main image to strictly match the provided reference skeleton image.
 
         [Strict Rules]
-        1. DO NOT touch, move, or redraw any original body parts (torso, head, intact limbs). Lock the torso completely.
-        2. Adjust ONLY the angle or position of the limb according to the specific [Correction Directive] below.
+        1. Look at the SECOND image (the skeleton graph). This is your exact target pose.
+        2. Adjust the angles and positions of the generated limbs in the FIRST image to perfectly align with the green skeleton lines.
         3. Maintain photorealistic skin texture and clothing continuity.
         """
 
-    def edit_image(self, image_url, prompt, mask_url=None):
+    def align_orig_to_gen(self, kpts_orig, kpts_gen, torso_indices):
+        """
+        把原始的完美目标位姿 (orig)，通过仿射变换对齐到当前生成图 (gen) 的躯干上。
+        """
+        # 确保提取的是干净的整数列表
+        if isinstance(torso_indices, dict):
+            torso_idx = list(torso_indices.values())
+        else:
+            torso_idx = [int(i) for i in torso_indices]
+
+        # orig(src) -> gen(dst)
+        src_pts = kpts_orig[torso_idx][:, :2].astype(np.float32)
+        dst_pts = kpts_gen[torso_idx][:, :2].astype(np.float32)
+
+        matrix, _ = cv2.estimateAffinePartial2D(src_pts, dst_pts)
+
+        if matrix is None:
+            print("⚠️ 无法计算仿射变换，回退到平移对齐...")
+            translation = np.mean(dst_pts, axis=0) - np.mean(src_pts, axis=0)
+            kpts_aligned = kpts_orig.copy()
+            kpts_aligned[:, :2] += translation
+            return kpts_aligned
+
+        pts_reshaped = np.array([kpts_orig[:, :2].astype(np.float32)])
+        aligned_2d = cv2.transform(pts_reshaped, matrix)[0]
+
+        kpts_aligned = kpts_orig.copy()
+        kpts_aligned[:, :2] = aligned_2d
+
+        return kpts_aligned
+
+    def edit_image(self, image_url, prompt, skeleton_url=None, mask_url=None):
         print(f"\n🎨 [生成] 调用 {self.edit_model} (同步对话模式)...")
 
         # 1. 组装新版 API 要求的 messages 结构
+        content_list = [{"image": image_url}]
+
+        if skeleton_url:
+            content_list.append({"image": skeleton_url})
+
+        if mask_url:
+            content_list.append({"image": mask_url})
+
+        content_list.append({"text": prompt.strip()})
+
         messages = [
             {
                 "role": "user",
-                "content": [
-                    {"image": image_url},
-                    {"text": prompt.strip()}
-                ]
+                "content": content_list
             }
         ]
 
-        # 如果有 mask_url，按顺序插入到 text 前面
-        if mask_url:
-            messages[0]["content"].insert(1, {"image": mask_url})
-
         try:
-            # 2. 发起同步调用 (自动等待直到图片生成完毕)
+            # 2. 发起同步调用
             response = MultiModalConversation.call(
                 api_key=os.getenv("DASHSCOPE_API_KEY"),
                 model=self.edit_model,
@@ -213,9 +385,7 @@ class GeometricRefinerAgent:
                 stream=False,
                 n=1,
                 watermark=False,
-                # 完整保留你精简版的负向提示词
                 negative_prompt="shifting torso, changing joint angles, redrawing background, missing limbs",
-                # 强烈建议设为 False，防止大模型魔改你的 prompt
                 prompt_extend=False
             )
 
@@ -223,21 +393,15 @@ class GeometricRefinerAgent:
             if response.status_code == 200:
                 for content in response.output.choices[0].message.content:
                     if 'image' in content:
-                        result_url = content['image']
-                        return result_url
+                        return content['image']
                 raise RuntimeError("❌ API 返回了 200，但未找到图片链接。")
             else:
-                error_msg = f"HTTP返回码：{response.status_code}, 错误信息：{response.message}"
-                raise RuntimeError(f"❌ 图像生成失败: {error_msg}")
+                raise RuntimeError(f"❌ 图像生成失败: HTTP {response.status_code}, {response.message}")
 
         except Exception as e:
             raise RuntimeError(f"❌ 大模型 API 调用崩溃: {str(e)}")
 
     def run(self, original_url, initial_gen_url, mask_url=None):
-        """
-        :param original_url: 原始残肢图片 (Ground Truth 几何参考)
-        :param initial_gen_url: 第一步 Agent 生成的初版图片
-        """
         print("\n" + "=" * 50)
         print(f"🔬 启动第二阶段: 几何精细校准 Agent")
         print("=" * 50)
@@ -256,7 +420,7 @@ class GeometricRefinerAgent:
             # 2. 提取当前生成图的位姿
             kpts_gen = self.pose_extractor.extract_31_keypoints(current_url)
 
-            # 3. 严格数学计算
+            # 3. 执行评估
             eval_res = self.evaluator.evaluate(
                 kpts_orig=kpts_orig,
                 kpts_gen=kpts_gen,
@@ -271,16 +435,32 @@ class GeometricRefinerAgent:
                 return generated_image_urls
             else:
                 print(f"⚠️ [校准未达标] {eval_res['reason']}")
-                print(f" Correction: {eval_res['correction']}")
 
             if i < self.max_iterations:
-                print("🔧 生成纠偏指令，提交重新编辑...")
-                # 将数学偏差转化为具体指令
-                current_prompt = f"{self.refine_instruction}\n\n[Correction Directive]: {eval_res['correction']}"
+                print("🔧 生成对齐骨架图，上传 OSS 并提交重新编辑...")
                 try:
-                    # 基于第一步的生成图进行微调编辑
-                    current_url = self.edit_image(current_url, current_prompt, mask_url)
+                    # 3.1 产生对齐后的目标骨架点 (orig 适配到当前 gen)
+                    kpts_target_aligned = self.align_orig_to_gen(
+                        kpts_orig,
+                        kpts_gen,
+                        eval_params["torso_indices"]
+                    )
+
+                    # 3.2 在本地画出骨架图
+                    # 注意：如果你的图片不是 1024x1024，建议这里动态传入 cv2.imread(本地原图).shape
+                    local_skeleton_path = draw_pose_skeleton(kpts_target_aligned, img_shape=(1024, 1024, 3))
+
+                    # 3.3 上传到 OSS 获取 URL
+                    skeleton_oss_url = self.oss_processor.upload_and_get_url(local_file_path=local_skeleton_path)
+                    print(f"☁️ 骨架图已上传至 OSS: {skeleton_oss_url}")
+
+                    # 3.4 组装 prompt，附带 correction 信息
+                    current_prompt = self.refine_instruction
+                    # 3.5 调用大模型 (传入原图 + OSS骨架图)
+                    current_url = self.edit_image(current_url, current_prompt, skeleton_url=skeleton_oss_url,
+                                                  mask_url=mask_url)
                     generated_image_urls.append(current_url)
+
                 except Exception as e:
                     print(f"❌ 微调中断: {e}")
                     break
@@ -288,7 +468,6 @@ class GeometricRefinerAgent:
                 print("🛑 已达最大校准次数，返回当前最优微调结果。")
 
         return generated_image_urls
-
 
 class AgenticImageEditor:
     def __init__(self, edit_model='qwen-image-2.0-pro', eval_model='qwen3.6-plus'):
