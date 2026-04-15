@@ -378,31 +378,45 @@ def project_mesh_overlay(image_path, mesh, M_inv, pred_cam, focal_length=5000.0,
     else:
         raise ValueError("图像保存失败")
 
+
 def get_final_calibration_matrix(kpts_orig, kpts_gen, image_path):
     """
-    kpts_orig: 原始 1024 图像的关键点
-    kpts_gen:  大模型生成 1024 图像后的关键点 (重新检测得到的)
+    量化测试专用版：自动剔除坏点，自适应平移计算，无需手动 Offset
     """
-    # 选取肩膀和髋部点 (COCO: 5,6,11,12)
     img = cv2.imread(image_path)
-    h_gen, w_gen = img.shape[:2]
-    indices = [5, 6, 11, 12]
-    src = kpts_orig[indices, :2]
-    dst = kpts_gen[indices, :2]
+    current_img_w = img.shape[1]
+    current_img_h = img.shape[0]
 
-    # 1. 计算【原始 -> 生成图】的仿射校准
-    M_calib, _ = cv2.estimateAffinePartial2D(src, dst)
+    # 🌟 优化 1：引入头部和躯干的全部强刚性特征点
+    # 0:nose, 1:L-eye, 2:R-eye, 3:L-ear, 4:R-ear, 5:L-sho, 6:R-sho, 11:L-hip, 12:R-hip
+    candidate_indices = [0, 1, 2, 3, 4, 5, 6, 11, 12]
 
-    # 2. 叠加【生成图(比如1024) -> HMR(256)】的缩放
-    scale_x = 256.0 / float(w_gen)
-    scale_y = 256.0 / float(h_gen)
-    S = np.array([
-        [scale_x, 0, 0],
-        [0, scale_y, 0]
-    ], dtype=np.float32)
+    valid_src = []
+    valid_dst = []
 
-    # 最终矩阵: P_256 = S * [M_calib | 1] * P_orig
-    # 这里简单处理：先做校准变换，再做缩放
+    # 🌟 优化 2：动态过滤无效点 (防止图片里人头被裁掉导致报错)
+    for idx in candidate_indices:
+        # 假设置信度或者坐标为 0 代表未检测到
+        if kpts_orig[idx][0] > 1.0 and kpts_gen[idx][0] > 1.0:
+            valid_src.append(kpts_orig[idx, :2])
+            valid_dst.append(kpts_gen[idx, :2])
+
+    src = np.array(valid_src, dtype=np.float32)
+    dst = np.array(valid_dst, dtype=np.float32)
+
+    if len(src) < 3:
+        raise ValueError("严重警告：有效对齐锚点不足 3 个，仿射矩阵计算失败，建议跳过该图像！")
+
+    # 🌟 优化 3：使用 RANSAC 算法 (自动找偏移，自动扔掉被大模型画歪的点)
+    M_calib, inliers = cv2.estimateAffinePartial2D(src, dst, method=cv2.RANSAC, ransacReprojThreshold=3.0)
+
+    # 独立计算 X 和 Y 的缩放因子，消除 Resize 变形
+    scale_x = 256.0 / float(current_img_w)
+    scale_y = 256.0 / float(current_img_h)
+    S = np.array([[scale_x, 0, 0],
+                  [0, scale_y, 0]], dtype=np.float32)
+
+    # 组合矩阵
     M_hmr_inv = S @ np.vstack([M_calib, [0, 0, 1]])
 
     return M_hmr_inv
