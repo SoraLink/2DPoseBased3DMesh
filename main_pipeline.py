@@ -385,7 +385,7 @@ def get_final_calibration_matrix(kpts_orig, kpts_gen, image_path):
     """
     # 选取肩膀和髋部点 (COCO: 5,6,11,12)
     img = cv2.imread(image_path)
-    current_img_w = img.shape[1]
+    h_gen, w_gen = img.shape[:2]
     indices = [5, 6, 11, 12]
     src = kpts_orig[indices, :2]
     dst = kpts_gen[indices, :2]
@@ -394,9 +394,12 @@ def get_final_calibration_matrix(kpts_orig, kpts_gen, image_path):
     M_calib, _ = cv2.estimateAffinePartial2D(src, dst)
 
     # 2. 叠加【生成图(比如1024) -> HMR(256)】的缩放
-    scale_factor = 256.0 / float(current_img_w)  # 假设你生成图是 1024
-    S = np.array([[scale_factor, 0, 0],
-                  [0, scale_factor, 0]], dtype=np.float32)
+    scale_x = 256.0 / float(w_gen)
+    scale_y = 256.0 / float(h_gen)
+    S = np.array([
+        [scale_x, 0, 0],
+        [0, scale_y, 0]
+    ], dtype=np.float32)
 
     # 最终矩阵: P_256 = S * [M_calib | 1] * P_orig
     # 这里简单处理：先做校准变换，再做缩放
