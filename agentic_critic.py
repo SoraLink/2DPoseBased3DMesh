@@ -541,6 +541,9 @@ class AgenticImageEditor:
         1. It is strictly prohibited to alter the original torso, head, and any existing intact limbs. These parts must remain exactly as they are.
         2. When generating the missing limbs, you must strictly follow the direction of the existing stump. Do not cause any joint angles to change after the completion.
         3. The entire person must be completely within the image; no part of the body should fall outside the frame.
+        
+        [Allowed Actions]
+        1. Change the background
         """
 
     def edit_image(self, image_url, action_prompt, base_instruction, mask_url=None):
