@@ -35,7 +35,7 @@ def segment_subject(image_path, keypoints, pad_ratio=0.3):
     # 1. 提取有效关键点
     points_coords = []
     for i in range(0, len(keypoints), 3):
-        x, y, v = keypoints[i], keypoints[i + 1], keypoints[i + 2]
+        x, y, v = keypoints[i]
         if v > 0:
             points_coords.append([x, y])
     input_points = np.array(points_coords)

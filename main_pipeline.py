@@ -62,7 +62,7 @@ def main(args):
     geometric_refiner = GeometricRefinerAgent(pose_extractor)
 
     print(f"\n[Processing] 开始处理图像: {args.img}")
-    kpts_orig, kpts_orig_format, types_orig = read_kpts_annotation(args.img, args.annotation_file)
+    kpts_orig, types_orig = read_kpts_annotation(args.img, args.annotation_file)
     sam2_img_path = segment_subject(args.img, kpts_orig)
 
     image_url = OSSProcessor().upload_and_get_url(local_file_path=sam2_img_path)
