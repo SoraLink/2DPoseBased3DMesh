@@ -257,16 +257,33 @@ class AgenticImageEditor:
         [Task: Semantic-Level Limb Completion]
         Objective: Perform local inpainting and completion on the subject's missing limb parts to generate a person with four intact limbs. All four limbs must be clearly visible.
         
-        [Strict Negative Constraints - Never Deviate]:
+        [Constraints]:
         1. It is strictly prohibited to alter the original torso, head, and any existing intact limbs. These parts must remain exactly as they are.
-        2. When completing the missing limbs, you must strictly follow the direction of the existing stump. Do not cause any joint angles to change after the completion.
+        2. When generating the missing limbs, you must strictly follow the direction of the existing stump. Do not cause any joint angles to change after the completion.
+        3. The entire person must be completely within the image; no part of the body should fall outside the frame.
+        
+        [Allowed Actions]
+        1. Change the background
+        """
+
+        self.constraints = """
+        [Constraints]:
+        1. It is strictly prohibited to alter the original torso, head, and any existing intact limbs. These parts must remain exactly as they are.
+        2. When generating the missing limbs, you must strictly follow the direction of the existing stump. Do not cause any joint angles to change after the completion.
         3. The entire person must be completely within the image; no part of the body should fall outside the frame.
         """
 
-    def edit_image(self, image_url, prompt, mask_url=None):
+    def edit_image(self, image_url, action_prompt, base_instruction, mask_url=None):
         print(f"\n🎨 [生成] 调用 {self.edit_model} (同步对话模式)...")
 
         # 1. 组装符合新版 API 要求的 messages 结构
+        prompt = f"""
+        {base_instruction}
+
+        =========================
+        [Specific Action for This Step]:
+        {action_prompt.strip()}
+        """
         messages = [
             {
                 "role": "user",
@@ -312,11 +329,59 @@ class AgenticImageEditor:
             # 捕获底层的网络断连、超时等异常，直接抛出清晰的报错
             raise RuntimeError(f"❌ 大模型 API 调用崩溃: {str(e)}")
 
+    def analyze_and_plan(self, image_url, base_instruction, current_step, total_steps, previous_feedback=None):
+        """
+        🧠 Thinking Module: Deep thinking and planning before image generation.
+        """
+        print(f"\n🧠 [Thinking Module] 正在进行合规审查与下一步规划...")
+
+        # 💡 强化：让反思上下文带上警告语气，引起大模型的高度重视
+        reflection_context = ""
+        if previous_feedback:
+            reflection_context = f"\n[Reflection Context]: Pay critical attention to the issues raised from the last step: {previous_feedback}. You MUST fix this."
+
+        think_prompt = f"""You are a Visual Task Decomposer. 
+
+        [OVERALL OBJECTIVE]:
+        {base_instruction}
+
+        Current Progress: Step {current_step} of {total_steps}.{reflection_context}
+
+        Your job is to compare the current image against the OVERALL OBJECTIVE, identify what is missing or flawed, and output an action-oriented prompt to generate the NEXT part. You always need to pay attention to the constraints and enforce them in your plan.
+
+        Output ONLY a JSON object:
+        {{
+          "thought_process": "Evaluate the image against the objective based on the reflection and decide what to draw or fix next.",
+          "edit_prompt": "An ACTION-FOCUSED prompt describing ONLY how to inpaint or adjust the specific missing limbs to ensure four intact limbs are visible. Ensure it strictly follows the requirements such as angle and position. DO NOT include general scene descriptions (e.g., do not describe the jersey, face, or background)."
+        }}"""
+        # 调用视觉大模型
+        resp = MultiModalConversation.call(
+            model=self.eval_model,
+            messages=[{
+                "role": "user",
+                "content": [
+                    {"image": image_url},
+                    {"text": think_prompt}
+                ]
+            }],
+            response_format={'type': 'json_object'}
+        )
+
+        content = resp.output.choices[0].message.content
+        if isinstance(content, list):
+            text_parts = [item['text'] for item in content if 'text' in item]
+            content = "".join(text_parts)
+        match = re.search(r'\{.*\}', content, re.DOTALL)
+        if match:
+            content = match.group(0)
+
+        return json.loads(content)
+
     def evaluate_image(self, original_url, current_url, original_prompt):
         print(f"\n🔍 [评估] 调用 {self.eval_model} 进行视觉审视...")
 
         eval_prompt = f"""You are a strict Image Quality Auditor. Compare the ORIGINAL and EDITED images.
-        Verify if the output meets these requirements: {original_prompt}
+        Verify if the output achieve the goal and meets these requirements: {original_prompt}
 
         CRITICAL INSPECTION POINTS:
         1. Are all 4 limbs (2 arms, 2 legs) present and complete?
@@ -327,7 +392,6 @@ class AgenticImageEditor:
         {{
           "passed": true/false,
           "reason": "Detailed explanation of violations in English (e.g., 'torso distorted', 'limb angle mismatch')",
-          "suggestion": "Specific correction command for the next iteration in English"
         }}"""
 
         resp = MultiModalConversation.call(
@@ -360,29 +424,30 @@ class AgenticImageEditor:
         try:
             return json.loads(content)
         except json.JSONDecodeError:
-            return {"passed": False, "reason": "JSON_PARSE_ERROR",
-                    "suggestion": "Re-generate following the original constraints strictly."}
+            return {"passed": False, "reason": "JSON_PARSE_ERROR"}
 
     def run(self, image_url, mask_url=None):
         generated_image_urls = []
         current_url = image_url
-        current_prompt = self.base_instruction
+        previous_feedback = None
         print(f"🚀 启动 Agentic 编辑流程 | 模型: {self.edit_model} + {self.eval_model}")
 
         for i in range(1, self.max_iterations + 1):
             print(f"\n{'=' * 40} 第 {i}/{self.max_iterations} 轮 {'=' * 40}")
 
+            plan_result = self.analyze_and_plan(current_url, self.base_instruction, i, self.max_iterations, previous_feedback)
+            print(f"\n💭 [Agent Thinking]:\n{plan_result['thought_process']}\n")
+            final_edit_prompt = plan_result["edit_prompt"] + "\n" + self.constraints
+            print(f"🎯 [Underlying Edit Prompt]:\n{final_edit_prompt}\n")
             # 1. 执行编辑
-            current_url = self.edit_image(current_url, current_prompt, mask_url)
-            generated_image_urls.append(current_url)
-
+            new_generated_url = self.edit_image(current_url, final_edit_prompt, self.base_instruction, mask_url)
+            generated_image_urls.append(new_generated_url)
 
             # 2. 自我审视（最后一轮直接返回）
             if i < self.max_iterations:
-                eval_res = self.evaluate_image(image_url, current_url, self.base_instruction)
+                eval_res = self.evaluate_image(image_url, new_generated_url, self.base_instruction)
                 print(f"📊 评估: {'✅ 通过' if eval_res['passed'] else '❌ 未通过'}")
                 print(f"📝 原因: {eval_res.get('reason', '-')}")
-                print(f" 意见: {eval_res.get('suggestion', '-')}")
 
                 if eval_res["passed"]:
                     print("🎉 约束全部满足，提前结束迭代！")
@@ -390,7 +455,10 @@ class AgenticImageEditor:
 
                 # 3. 动态注入修正指令
                 print("🛠️ 注入修正指令，准备下一轮生成...")
-                current_prompt = f"{self.base_instruction}\n\n[Correction Directive]: {eval_res['suggestion']}"
+                previous_feedback = eval_res.get('reason', 'Unknown error.')
+                print(f"⚠️ Flaw detected: {eval_res.get('reason', '-')}. Recorded for reflection in the next iteration.")
+                current_url = new_generated_url
+
             else:
                 print("⚠️ 已达最大迭代次数，返回当前最佳结果。")
 
