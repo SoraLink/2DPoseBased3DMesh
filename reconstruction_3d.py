@@ -33,16 +33,23 @@ class ReconstructionEngine:
 
         with torch.no_grad():
             out = self.model({'img': batch_images})
-            vertices = out['pred_vertices'][0].cpu().numpy()
+            pred_vertices_tensor = out['pred_vertices'][0]
+            vertices = pred_vertices_tensor.cpu().numpy()
             faces = self.model.smpl.faces
-            joints_3d = out['pred_keypoints_3d'][0].cpu().numpy()
+
+            # ==========================================
+            # 🌟 修复核心：不要用默认的 pred_keypoints_3d
+            # 直接使用模型的 SMPL 回归器，从顶点计算绝对标准的 24 关节
+            # ==========================================
+            J_regressor = self.model.smpl.J_regressor  # 形状: [24, 6890]
+            # 矩阵乘法: (24, 6890) x (6890, 3) = (24, 3) 标准 3D 关节
+            joints_3d = torch.matmul(J_regressor, pred_vertices_tensor).cpu().numpy()
 
         mesh = trimesh.Trimesh(vertices, faces)
         mesh.export(save_path)
         print(f"✨ 成功! Mesh 已保存至: {save_path}")
 
-        # ⬇️ 新增：构造 SMPL 关节字典 (SMPL 标准前 24 个关节的索引映射)
-        # 这样你在 main 函数里就能直接用名字取坐标了，不用去记复杂的数字索引
+        # 现在这些索引绝对是 SMPL 官方定义的顺序，绝不可能切歪！
         pred_joints_dict = {
             'pelvis': joints_3d[0],
             'left_hip': joints_3d[1],
@@ -60,5 +67,4 @@ class ReconstructionEngine:
             'right_wrist': joints_3d[21],
         }
 
-        # 现在返回两个值：路径 + 3D 字典
         return save_path, pred_joints_dict

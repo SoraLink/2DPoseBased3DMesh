@@ -36,7 +36,7 @@ def parse_args():
                         default='cuda:0',
                         help='Device to run pose extraction on (e.g., cuda:0 or cpu)')
     parser.add_argument('--annotation_file', type=str,
-                        default='./data/ldpose_train_25kpts.json',
+                        default='./data/train_final.json',
                         help='Path to the annotation file (optional)')
     parser.add_argument('--image_save_dir', type=str)
     parser.add_argument('--mesh_save_dir', type=str)
@@ -228,8 +228,10 @@ def main(args):
                 res_name = METAINFO['keypoint_info'][i]['name']
 
                 # 获取 2D 坐标 (假设 kpts_orig 的格式是 [x, y, conf])
-                pt_2d = kpts_orig[i][:2]
-
+                x = kpts_orig[i * 3]
+                y = kpts_orig[i * 3 + 1]
+                v = kpts_orig[i * 3 + 2]
+                pt_2d = np.array([x, y])
                 # 查表找到对应的 3D 骨骼起点和终点
                 if res_name in RES_BONE_MAPPING:
                     start_joint_name, end_joint_name = RES_BONE_MAPPING[res_name]
@@ -259,7 +261,7 @@ def main(args):
             print("🔍 未检测到任何有效的残肢点 (types 均不为 0)，保留完整 Mesh。")
 
     except Exception as e:
-        print(f"❌ 流程中断: {e}")
+        raise e
 
 def save_image_from_url(urls, source, save_dir):
     os.makedirs(save_dir, exist_ok=True)
