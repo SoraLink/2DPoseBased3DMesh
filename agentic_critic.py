@@ -622,7 +622,14 @@ class AgenticImageEditor:
 
         Current Progress: Step {current_step} of {total_steps}.{reflection_context}
 
-        Your job is to compare the current image against the OVERALL OBJECTIVE, identify what is missing or flawed, and output an action-oriented prompt to generate the NEXT part. You always need to pay attention to the constraints and enforce them in your plan.
+        Your job is to compare the current image against the OVERALL OBJECTIVE, identify what is missing or flawed, and output an action-oriented prompt to generate the NEXT part.
+
+        When addressing missing limbs, strictly follow these steps:
+        1. Observe: Closely inspect the residual limb (stump) in the current image.
+        2. Analyze Orientation: Explicitly state the spatial direction the residual limb is pointing (e.g., 'pointing 45-degrees downward to the left' or 'facing directly forward').
+        3. Guide Generation: Incorporate this exact orientation into your action-oriented prompt so the new limb extends smoothly and naturally from the stump's exact trajectory.
+        
+        You always need to pay attention to the constraints and enforce them in your plan.
 
         Output ONLY a JSON object:
         {{
