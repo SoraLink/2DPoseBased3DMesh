@@ -24,63 +24,64 @@ def show_points(coords, labels, ax, marker_size=375):
         ax.scatter(pos_points[:, 0], pos_points[:, 1], color='green', marker='*', s=marker_size, edgecolor='white',
                    linewidth=1.25)
 
+
 def segment_subject(image_path, keypoints, pad_ratio=0.3):
+    """
+    SAM 2 图像分割与扩图函数 (防马赛克、高精度版)
+    """
     sam2_checkpoint = "./models/sam2/sam2.1_hiera_large.pt"
     model_cfg = "configs/sam2.1/sam2.1_hiera_l.yaml"
+
+    # 1. 提取有效关键点
     points_coords = []
     for i in range(0, len(keypoints), 3):
         x, y, v = keypoints[i], keypoints[i + 1], keypoints[i + 2]
         if v > 0:
             points_coords.append([x, y])
-
     input_points = np.array(points_coords)
     input_labels = np.ones(len(input_points))
 
-    print(f"成功提取 {len(input_points)} 个有效关键点坐标。")
-
-    # 2. 读取图片 (终极防弹版，完美支持中文路径)
-    print(f"尝试读取图片路径: {image_path}")
-
-    # 使用 numpy 读取字节流再用 cv2 解码
+    # 2. 读取图片 (支持中文路径)
     image_data = np.fromfile(image_path, dtype=np.uint8)
     image = cv2.imdecode(image_data, cv2.IMREAD_COLOR)
-
-    # 防御性拦截
     if image is None:
-        raise FileNotFoundError(f"无法读取图片！请检查路径是否拼写正确，或者文件是否损坏: {image_path}")
+        raise FileNotFoundError(f"无法读取图片: {image_path}")
+    image_rgb = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
 
-    image = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
-
-    # 3. 初始化 SAM 2 模型
-    print("正在加载 SAM 2 模型...")
+    # 3. 初始化 SAM 2
     device = "cuda" if torch.cuda.is_available() else "cpu"
     sam2_model = build_sam2(model_cfg, sam2_checkpoint, device=device)
     predictor = SAM2ImagePredictor(sam2_model)
 
-    # 4. 推理 (加入半精度与推理模式优化)
-    print("正在生成分割 Mask...")
-    with torch.inference_mode(), torch.autocast("cuda", dtype=torch.bfloat16):
-        predictor.set_image(image)
-
+    # 4. 生成 Mask (🌟 修复: 强制 float32 提高精度，消除初级噪声)
+    print("正在生成高精度分割 Mask...")
+    with torch.inference_mode():
+        predictor.set_image(image_rgb)
         masks, scores, logits = predictor.predict(
             point_coords=input_points,
             point_labels=input_labels,
             multimask_output=False
         )
 
-    # ================= 新增：裁剪人物并保存透明背景图 =================
-    print("正在提取人物并生成扩展的 JPG 画布...")
+    # 5. Mask 后处理 (🌟 核心修复: 解决红衣服上的马赛克空洞)
+    mask_raw = (masks[0] * 255).astype(np.uint8)
 
-    # 1. 提取人物像素（黑色背景）
-    mask_bool = masks[0].astype(bool)
-    image_subject_only = np.zeros_like(image, dtype=np.uint8)
-    image_subject_only[mask_bool] = image[mask_bool]
+    # 使用 5x5 的椭圆核执行闭运算，强行填补内部的小黑洞/芝麻点
+    kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (5, 5))
+    mask_closed = cv2.morphologyEx(mask_raw, cv2.MORPH_CLOSE, kernel, iterations=2)
 
-    # 2. 计算扩图尺寸 (Padding)
+    # 边缘抗锯齿：轻微模糊后重新二值化
+    mask_blurred = cv2.GaussianBlur(mask_closed, (3, 3), 0)
+    _, mask_final = cv2.threshold(mask_blurred, 127, 255, cv2.THRESH_BINARY)
+    mask_bool = (mask_final > 0)
+
+    # 6. 提取人物 (黑底)
+    image_subject_only = np.zeros_like(image_rgb)
+    image_subject_only[mask_bool] = image_rgb[mask_bool]
+
+    # 7. 扩图 (Padding)
     h, w = image.shape[:2]
     p_h, p_w = int(h * pad_ratio), int(w * pad_ratio)
-
-    # 3. 四周填充黑边 (BORDER_CONSTANT 默认就是 0，即黑色)
     image_padded = cv2.copyMakeBorder(
         image_subject_only,
         p_h, p_h, p_w, p_w,
@@ -88,22 +89,22 @@ def segment_subject(image_path, keypoints, pad_ratio=0.3):
         value=[0, 0, 0]
     )
 
-    # 4. 构造输出路径 (.jpg)
+    # 8. 保存高质量 JPG (100质量)
     image_name = os.path.basename(image_path)
     image_dir = os.path.dirname(image_path)
     output_path = os.path.join(image_dir, "padded_" + image_name.rsplit('.', 1)[0] + ".jpg")
 
-    # 5. 防弹法保存高质量 JPG (RGB 转回 BGR 再保存)
-    image_bgr = cv2.cvtColor(image_padded, cv2.COLOR_RGB2BGR)
-    is_success, im_buf_arr = cv2.imencode(".jpg", image_bgr, [int(cv2.IMWRITE_JPEG_QUALITY), 100])
+    image_padded_bgr = cv2.cvtColor(image_padded, cv2.COLOR_RGB2BGR)
+    encode_param = [int(cv2.IMWRITE_JPEG_QUALITY), 100]
+    is_success, im_buf_arr = cv2.imencode(".jpg", image_padded_bgr, encode_param)
 
     if is_success:
         im_buf_arr.tofile(output_path)
-        print(f"✅ 扩图完成！已保存至: {output_path}")
-        # 这里只返回路径，因为你不需要在这个阶段改 keypoints
+        print(f"✅ 成功提取主体并扩图: {output_path}")
+        # 🌟 根据你的要求：不在这里修改 keypoints，保持原始坐标系，交给下游校准器处理
         return output_path
     else:
-        raise ValueError("Failed to save padded image.")
+        raise ValueError("图像编码保存失败")
 
 
 def main():
