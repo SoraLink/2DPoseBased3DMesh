@@ -371,8 +371,8 @@ def get_final_calibration_matrix(kpts_orig, kpts_gen):
     """
     # 选取肩膀和髋部点 (COCO: 5,6,11,12)
     indices = [5, 6, 11, 12]
-    src = np.array([[kpts_orig[i * 3], kpts_orig[i * 3 + 1]] for i in indices], dtype=np.float32)
-    dst = np.array([[kpts_gen[i * 3], kpts_gen[i * 3 + 1]] for i in indices], dtype=np.float32)
+    src = kpts_orig[indices, :2]
+    dst = kpts_gen[indices, :2]
 
     # 1. 计算【原始 -> 生成图】的仿射校准
     M_calib, _ = cv2.estimateAffinePartial2D(src, dst)
