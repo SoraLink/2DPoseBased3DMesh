@@ -228,10 +228,7 @@ def main(args):
                 res_name = METAINFO['keypoint_info'][i]['name']
 
                 # 获取 2D 坐标 (假设 kpts_orig 的格式是 [x, y, conf])
-                x = kpts_orig[i * 3]
-                y = kpts_orig[i * 3 + 1]
-                v = kpts_orig[i * 3 + 2]
-                pt_2d = np.array([x, y])
+                pt_2d = kpts_orig[i][0:2]
                 # 查表找到对应的 3D 骨骼起点和终点
                 if res_name in RES_BONE_MAPPING:
                     start_joint_name, end_joint_name = RES_BONE_MAPPING[res_name]

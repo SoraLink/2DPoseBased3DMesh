@@ -81,7 +81,11 @@ def read_kpts_annotation(image_path, annotation_path):
         if ann['image_id'] == image_id:
             kpts = ann['keypoints']
             types = ann['keypoint_types']
+            ori_kpts = np.zeros((31, 3))
             for i, kpt_type in enumerate(types):
+                x, y, v = kpts[i * 3], kpts[i * 3 + 1], kpts[i * 3 + 2]
+                ori_kpts[i, :2] = [x, y]
+                ori_kpts[i, 2] = v
                 if kpt_type != 0:
                     kpts[i, 2] = 0.0
             return kpts, types
