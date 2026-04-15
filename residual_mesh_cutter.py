@@ -126,4 +126,4 @@ class ResidualMeshCutter:
         output_path = mesh_path.replace(".obj", "_truncated.obj")
         mesh.export(output_path)
         print(f"✅ [Mesh Cutter] 手术结束，保存至: {output_path}")
-        return output_path
+        return mesh

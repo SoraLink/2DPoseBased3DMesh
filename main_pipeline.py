@@ -251,17 +251,118 @@ def main(args):
             # 初始化截肢器 (焦距 5000 根据 HMR/CLIFF 默认设置)
             mesh_cutter = ResidualMeshCutter(focal_length=5000.0, img_center=(w / 2, h / 2))
 
-            mesh_cutter.process_multiple_cuts(
+            mesh = mesh_cutter.process_multiple_cuts(
                 mesh_path=mesh_save_path,
                 cut_tasks=cut_tasks,
                 M_inv=M_inv,
             )
         else:
-            print("🔍 未检测到任何有效的残肢点 (types 均不为 0)，保留完整 Mesh。")
+            raise ValueError("No residual bone cutting tasks found.")
+
+        project_mesh_overlay(args.img, mesh, M_inv)  # 将最终 Mesh 投影回原图坐标系，生成 Overlay
 
     except Exception as e:
         raise e
 
+
+def project_mesh_overlay(image_path, mesh, M_inv, focal_length=5000.0, hmr_size=(256, 256)):
+    """
+    将 3D Mesh (HMR space, e.g., SMPL) 精准投影回原始图片坐标系，生成绿色 Overlay。
+    :param image_path: 原始图片路径 (incomplete)
+    :param mesh: 切割完成后的 trimesh 对象
+    :param M_inv: 2x3 矩阵 (原始坐标 -> HMR 256 坐标的校准矩阵)
+    :param focal_length: HMR 内部焦距 (5000.0)
+    :param hmr_size: HMR 内部画布 (256, 256)
+    """
+    # ================================================================
+    # 第一步：计算反向仿射矩阵 (HMR 256 -> 原始坐标系)
+    # ================================================================
+    # 我们需要的是从 [生成图坐标] 映射回 [原始坐标] 的变换 (dst -> src)
+    if M_inv.shape != (2, 3):
+        raise ValueError("M_inv parameters must be a 2x3 matrix.")
+
+    # 🌟 关键：对齐工程细节。将 2x3 扩充为 3x3，然后求逆，再取回 2x3
+    M_inv_augmented = np.vstack([M_inv, [0, 0, 1]])  # 变为 3x3 齐次矩阵
+    try:
+        M_hmr_to_orig_3x3 = np.linalg.inv(M_inv_augmented)  # 完美求逆
+        M_hmr_to_orig = M_hmr_to_orig_3x3[:2, :]  # 变回 2x3 用于 warpAffine
+    except np.linalg.LinAlgError:
+        raise ValueError("Matrix inversion failed. M_inv calculation is incorrect.")
+
+    # ================================================================
+    # 第二步：将 3D Mesh 投影到 HMR 虚拟画布 (3D -> 2D 256x256)
+    # ================================================================
+    print("[Visualization] 正在将 3D 拓扑投影至 HMR 画布...")
+    fx, fy = focal_length, focal_length
+    cx, cy = hmr_size[0] / 2.0, hmr_size[1] / 2.0
+
+    vertices = mesh.vertices
+    projected_vertices = np.zeros((len(vertices), 2), dtype=np.int32)
+    # 默认设在画布外远端
+    projected_vertices[:] = -1e6
+
+    # 执行 3D -> 2D 投影，只处理相机前方的点
+    for i, vert in enumerate(vertices):
+        if vert[2] > 0.0:
+            X, Y, Z = vert[0], vert[1], vert[2]
+            projected_vertices[i, 0] = int(fx * (X / Z) + cx)
+            projected_vertices[i, 1] = int(fy * (Y / Z) + cy)
+
+    # 创建 HMR 画布的二值遮罩 (256x256)
+    mask_256 = np.zeros(hmr_size, dtype=np.uint8)
+
+    # 将 Faces 的顶点索引映射到投影后的 2D 坐标
+    faces_int = mesh.faces.astype(np.int32)
+
+    # 🌟 优化：只绘制那些三个顶点都在相机前方的面，防止虚边
+    valid_faces_mask = (projected_vertices[faces_int] > -1e5).all(axis=2).all(axis=1)
+    projected_faces = projected_vertices[faces_int[valid_faces_mask]]
+
+    # 暴力填充面，生成完整的 segmentation mask
+    cv2.fillPoly(mask_256, projected_faces, 255)
+
+    # ================================================================
+    # 第三步：将 Mask 变形对齐原图，并进行 Alpha 混合
+    # ================================================================
+    print("[Visualization] 正在坐标反向补偿并混合 Overlay...")
+
+    # 1. 读取原图
+    image_data = np.fromfile(image_path, dtype=np.uint8)
+    original_image = cv2.imdecode(image_data, cv2.IMREAD_COLOR)
+    h_orig, w_orig = original_image.shape[:2]
+
+    # 2. 🌟 关键：利用 M_hmr_to_orig 将 256 Mask 变形到原图尺寸和位置
+    # 这一步将大模型生成的肢体误差完美消化。
+    mask_orig = cv2.warpAffine(mask_256, M_hmr_to_orig, (w_orig, h_orig), flags=cv2.INTER_LINEAR)
+
+    # 3. 创建彩色 Overlay (绿色)
+    overlay_color = np.zeros_like(original_image)
+    overlay_color[:] = [0, 255, 0]  # 纯绿，可以改为你喜欢的任何颜色
+
+    # 4. 混合 Overlay (Alpha 混合)
+    output_image = original_image.copy()
+    alpha = 0.5  # 透明度
+
+    # 只有 mask 覆盖的区域进行混合
+    mask_bool = (mask_orig > 127)
+    cv2.addWeighted(overlay_color, alpha, output_image, 1 - alpha, 0, output_image, dst=output_image, dtype=cv2.CV_8U)
+    # 将 mask 之外的区域变回原图
+    output_image[~mask_bool] = original_image[~mask_bool]
+
+    # ================================================================
+    # 第四步：保存高质量结果
+    # ================================================================
+    output_path = image_path.replace(".jpg", "_projection.jpg").replace(".png", "_projection.jpg")
+
+    encode_param = [int(cv2.IMWRITE_JPEG_QUALITY), 100]
+    is_success, im_buf_arr = cv2.imencode(".jpg", output_image, encode_param)
+
+    if is_success:
+        im_buf_arr.tofile(output_path)
+        print(f"✅ [Projector] 几何闭环可视化已生成: {output_path}")
+        return output_path
+    else:
+        raise ValueError("图像保存失败")
 
 def get_final_calibration_matrix(kpts_orig, kpts_gen):
     """
