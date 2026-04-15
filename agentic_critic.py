@@ -526,7 +526,7 @@ class AgenticImageEditor:
         self.max_iterations = 3
         self.base_instruction = """
         [Task: Semantic-Level Limb Completion]
-        Objective: Perform local inpainting and completion on the subject's missing limb parts to generate a person with four intact limbs. All four limbs must be clearly visible.
+        Objective: Perform local inpainting and completion on the subject's missing limb parts to generate a person with four intact limbs. All four limbs including hands and feets must be clearly visible.
         
         [Constraints]:
         1. It is strictly prohibited to alter the original torso, head, and any existing intact limbs. These parts must remain exactly as they are.
