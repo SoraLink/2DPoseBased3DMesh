@@ -1,5 +1,6 @@
 import os
 
+import dashscope
 import numpy as np
 import requests
 import time
@@ -13,6 +14,8 @@ from agentic_critic import AgenticImageEditor, GeometricRefinerAgent
 from reconstruction_3d import ReconstructionEngine
 from sam2_coco import segment_subject
 
+dashscope.base_http_api_url = 'https://dashscope-intl.aliyuncs.com/api/v1'
+dashscope.api_key = os.getenv("DASHSCOPE_API_KEY")
 
 def parse_args():
     parser = argparse.ArgumentParser(description="🚀 Neuro-Symbolic Agentic 3D Pipeline")
@@ -67,8 +70,8 @@ def main(args):
     # 4. Agentic Loop (生成 -> Critic -> 再生成)
     # ==========================================
     save_dir = args.image_save_dir
-    if not os.path.exists(save_dir):
-        save_dir = time.time()
+    if not isinstance(save_dir, str):
+        save_dir = f"./workdir/output_{int(time.time())}"
     generated_image_urls = image_editor.run(image_url)
     last_generated_image_url = generated_image_urls[-1]
     save_image_from_url(generated_image_urls, "image_editor", save_dir)
