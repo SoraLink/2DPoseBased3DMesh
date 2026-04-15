@@ -463,7 +463,7 @@ class GeometricRefinerAgent:
 
                 except Exception as e:
                     print(f"❌ 微调中断: {e}")
-                    break
+                    raise e
             else:
                 print("🛑 已达最大校准次数，返回当前最优微调结果。")
 
