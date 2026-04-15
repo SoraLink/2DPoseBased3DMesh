@@ -320,7 +320,8 @@ def project_mesh_overlay(image_path, mesh, M_inv, focal_length=5000.0, hmr_size=
 
     # 暴力填充面，生成完整的 segmentation mask
     cv2.fillPoly(mask_256, projected_faces, 255)
-
+    cv2.imwrite("debug_1_mask_256.jpg", mask_256)
+    print(f"DEBUG: 256掩码已保存，白色像素点数: {np.sum(mask_256 > 0)}")
     # ================================================================
     # 第三步：将 Mask 变形对齐原图，并进行 Alpha 混合
     # ================================================================
@@ -334,7 +335,8 @@ def project_mesh_overlay(image_path, mesh, M_inv, focal_length=5000.0, hmr_size=
     # 2. 🌟 关键：利用 M_hmr_to_orig 将 256 Mask 变形到原图尺寸和位置
     # 这一步将大模型生成的肢体误差完美消化。
     mask_orig = cv2.warpAffine(mask_256, M_hmr_to_orig, (w_orig, h_orig), flags=cv2.INTER_LINEAR)
-
+    cv2.imwrite("debug_2_mask_orig.jpg", mask_orig)
+    print(f"DEBUG: 变换后掩码已保存，白色像素点数: {np.sum(mask_orig > 0)}")
     # 3. 创建彩色 Overlay (绿色)
     overlay_color = np.zeros_like(original_image)
     overlay_color[:] = [0, 255, 0]  # 纯绿，可以改为你喜欢的任何颜色
