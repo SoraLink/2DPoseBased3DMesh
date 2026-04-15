@@ -2,13 +2,40 @@ import json
 import math
 import os
 import re
+import time
 
+import cv2
 from dashscope import MultiModalConversation
 import numpy as np
 
 from auto_param_builder import AutoParamBuilder
 from pose_extractor import PoseExtractor
 
+
+def debug_visualize_alignment(kpts_orig, kpts_aligned, save_dir="./debug"):
+    """
+    最简单的调试工具：把两组点画在同一个纯白画布上对比。
+    蓝点是原始图(基准)，红点是对齐后的生成图。
+    """
+    os.makedirs(save_dir, exist_ok=True)
+    # 创建 1000x1000 的纯白画布 (如果你的坐标范围更大，可以把 1000 改大点)
+    canvas = np.ones((1000, 1000, 3), dtype=np.uint8) * 255
+
+    # 1. 画原始点 (蓝色，稍微画大一点作为底)
+    for pt in kpts_orig:
+        if len(pt) >= 3 and pt[2] == 0:
+            continue
+        cv2.circle(canvas, (int(pt[0]), int(pt[1])), 6, (255, 0, 0), -1)
+
+    # 2. 画对齐后的生成点 (红色，稍微画小一点，看能不能盖在蓝点上)
+    for pt in kpts_aligned:
+        if len(pt) >= 3 and pt[2] == 0:
+            continue
+        cv2.circle(canvas, (int(pt[0]), int(pt[1])), 4, (0, 0, 255), -1)
+
+    save_path = os.path.join(save_dir, f"align_{int(time.time())}.jpg")
+    cv2.imwrite(save_path, canvas)
+    print(f"👁️ [Debug] 点位对比图已保存至: {save_path} (蓝:原图, 红:对齐后)")
 
 class PoseGeometricEvaluator:
     def __init__(self, displacement_threshold=15.0, angle_threshold_deg=10.0):
@@ -17,10 +44,10 @@ class PoseGeometricEvaluator:
 
     def _get_intersection(self, p1, p2, p3, p4):
         """计算躯体对角线交点"""
-        x1, y1 = p1
-        x2, y2 = p2
-        x3, y3 = p3
-        x4, y4 = p4
+        x1, y1, _ = p1
+        x2, y2, _ = p2
+        x3, y3, _ = p3
+        x4, y4, _ = p4
         denom = (x1 - x2) * (y3 - y4) - (y1 - y2) * (x3 - x4)
         if denom == 0: return None
         px = ((x1 * y2 - y1 * x2) * (x3 - x4) - (x1 - x2) * (x3 * y4 - y3 * x4)) / denom
@@ -28,25 +55,39 @@ class PoseGeometricEvaluator:
         return np.array([px, py])
 
     def align_poses(self, kpts_orig, kpts_gen, torso_indices):
-        """对齐原图与生成图的躯干中心"""
-        l_sho = kpts_orig[torso_indices['L_sho']]
-        r_hip = kpts_orig[torso_indices['R_hip']]
-        r_sho = kpts_orig[torso_indices['R_sho']]
-        l_hip = kpts_orig[torso_indices['L_hip']]
-        center_orig = self._get_intersection(l_sho, r_hip, r_sho, l_hip)
+        """
+        使用 OpenCV 的相似仿射变换 (平移 + 旋转 + 等比例缩放) 对齐两组关键点。
+        """
+        # 1. 提取稳定的参考点 (例如躯干)，只拿前两维 (x, y) 坐标
+        # 假设 kpts_orig 和 kpts_gen 都是 (N, 3) 的 numpy 数组
+        torso_indices = list(torso_indices.values())
+        src_pts = kpts_gen[torso_indices][:, :2].astype(np.float32)
+        dst_pts = kpts_orig[torso_indices][:, :2].astype(np.float32)
 
-        l_sho_g = kpts_gen[torso_indices['L_sho']]
-        r_hip_g = kpts_gen[torso_indices['R_hip']]
-        r_sho_g = kpts_gen[torso_indices['R_sho']]
-        l_hip_g = kpts_gen[torso_indices['L_hip']]
-        center_gen = self._get_intersection(l_sho_g, r_hip_g, r_sho_g, l_hip_g)
+        # 2. 计算变换矩阵 (2x3 矩阵)
+        # estimateAffinePartial2D 会返回最优的 [旋转+缩放 | 平移] 矩阵
+        transform_matrix, inliers = cv2.estimateAffinePartial2D(src_pts, dst_pts)
 
-        if center_orig is None or center_gen is None:
-            raise ValueError("无法计算躯干中心点，请检查关键点提取是否完整。")
+        if transform_matrix is None:
+            print("⚠️ 警告: 无法计算仿射变换矩阵，退回简单的中心点平移。")
+            # 这里可以写你之前的 translation_vector 备用逻辑，防止极少数极端情况报错
+            translation_vector = np.mean(dst_pts, axis=0) - np.mean(src_pts, axis=0)
+            kpts_aligned = kpts_gen.copy()
+            kpts_aligned[:, :2] += translation_vector
+            return kpts_aligned, translation_vector
 
-        translation_vector = center_orig - center_gen
-        kpts_aligned = {k: v + translation_vector for k, v in kpts_gen.items()}
-        return kpts_aligned, translation_vector
+        # 3. 将计算出的变换矩阵，应用到生成图的 **所有** 关键点上
+        all_src_pts = kpts_gen[:, :2].astype(np.float32)
+
+        # cv2.transform 要求输入的形状是 (1, N, 2)
+        all_src_pts_reshaped = np.array([all_src_pts])
+        aligned_pts_2d = cv2.transform(all_src_pts_reshaped, transform_matrix)[0]
+
+        # 4. 把对齐后的 2D 坐标拼回原来的 (N, 3) 数组中 (保留原来的 Z 轴或置信度)
+        kpts_aligned = kpts_gen.copy()
+        kpts_aligned[:, :2] = aligned_pts_2d
+
+        return kpts_aligned, transform_matrix
 
     def calculate_vector_angle(self, v1, v2):
         """计算向量夹角"""
@@ -57,7 +98,7 @@ class PoseGeometricEvaluator:
 
     def evaluate(self, kpts_orig, kpts_gen, stable_keys, residual_vecs_list, generated_vecs_list, torso_indices):
         kpts_aligned, _ = self.align_poses(kpts_orig, kpts_gen, torso_indices)
-
+        debug_visualize_alignment(kpts_orig, kpts_aligned)
         error_reasons = []
         correction_steps = []
 
@@ -202,9 +243,9 @@ class GeometricRefinerAgent:
         print("=" * 50)
 
         # 1. 提取原图的绝对基准点 (Ground Truth)
-        kpts_orig = self.pose_extractor.extract_31_keypoints(original_url)
+        kpts_orig = self.pose_extractor.extract_31_keypoints('./eval/cropped_baidu_残疾运动员_841.png')
 
-        current_url = initial_gen_url
+        current_url = './first_try/image_editor_0.jpg'
         generated_image_urls = [current_url]
 
         eval_params = self.auto_param_builder.infer_params(kpts_orig)
@@ -230,6 +271,7 @@ class GeometricRefinerAgent:
                 return generated_image_urls
             else:
                 print(f"⚠️ [校准未达标] {eval_res['reason']}")
+                print(f" Correction: {eval_res['correction']}")
 
             if i < self.max_iterations:
                 print("🔧 生成纠偏指令，提交重新编辑...")

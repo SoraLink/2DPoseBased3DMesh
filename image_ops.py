@@ -1,8 +1,11 @@
+import tempfile
+
 import cv2
 import numpy as np
 import base64
 import mimetypes
 
+from PIL import Image
 from dotenv import load_dotenv
 from tqdm import tqdm
 
@@ -148,7 +151,7 @@ class OSSProcessor:
 
     def upload_and_get_url(self, local_file_path, folder="agent_images", make_public=True):
         """
-        上传文件到 OSS 并返回 URL
+        将图片转换为 JPG 后上传文件到 OSS 并返回 URL
 
         Args:
             local_file_path: 本地文件路径
@@ -158,19 +161,60 @@ class OSSProcessor:
         if not os.path.exists(local_file_path):
             raise FileNotFoundError(f"❌ 找不到要上传的文件: {local_file_path}")
 
-        file_extension = os.path.splitext(local_file_path)[1]
+        # 获取原始后缀
+        original_extension = os.path.splitext(local_file_path)[1].lower()
+
+        file_to_upload = local_file_path
+        file_extension = original_extension
+        temp_jpg_path = None
+
+        # === 新增：如果不是 JPG/JPEG，则尝试转换为 JPG ===
+        if original_extension not in ['.jpg', '.jpeg']:
+            try:
+                print(f"🔄 正在将图片格式 {original_extension} 转换为 JPG...")
+                with Image.open(local_file_path) as img:
+                    # 处理带透明通道的图片(PNG等)，防止转换为JPEG时背景变黑/报错
+                    if img.mode in ('RGBA', 'LA', 'P'):
+                        background = Image.new('RGB', img.size, (255, 255, 255))
+                        # 如果有透明通道，将原图粘贴到白色背景上
+                        if img.mode == 'RGBA':
+                            background.paste(img, mask=img.split()[3])
+                        else:
+                            background.paste(img)
+                        img = background
+                    elif img.mode != 'RGB':
+                        img = img.convert('RGB')
+
+                    # 生成临时文件路径
+                    fd, temp_jpg_path = tempfile.mkstemp(suffix='.jpg')
+                    os.close(fd)  # 关闭底层文件描述符
+
+                    # 保存为 JPG，quality=95 保证图片质量
+                    img.save(temp_jpg_path, format='JPEG', quality=95)
+
+                    # 更新接下来要上传的文件路径和后缀
+                    file_to_upload = temp_jpg_path
+                    file_extension = '.jpg'
+            except Exception as e:
+                # 如果转换失败（比如传入的根本不是图片文件而是txt），则继续上传原文件
+                print(f"⚠️ 图片转 JPG 失败（可能非图片文件），将原样上传。错误信息: {e}")
+                if temp_jpg_path and os.path.exists(temp_jpg_path):
+                    os.remove(temp_jpg_path)
+                    temp_jpg_path = None
+
+        # 生成唯一的 OSS 对象名称
         unique_filename = f"{uuid.uuid4().hex}{file_extension}"
         object_name = f"{folder}/{unique_filename}"
 
         print(f"☁️ 准备上传至 OSS: {object_name}")
-        tracker = OSSProgressTracker(description=f"上传 {os.path.basename(local_file_path)}")
+        tracker = OSSProgressTracker(description=f"上传 {unique_filename}")
 
         try:
-            # 分片断点续传上传
+            # 分片断点续传上传（注意这里使用的是 file_to_upload）
             oss2.resumable_upload(
                 self.bucket,
                 object_name,
-                local_file_path,
+                file_to_upload,
                 multipart_threshold=100 * 1024,
                 part_size=100 * 1024,
                 num_threads=3,
@@ -193,3 +237,12 @@ class OSSProcessor:
             raise RuntimeError(f"❌ 上传网络异常: {e}")
         except oss2.exceptions.OssError as e:
             raise RuntimeError(f"❌ OSS 服务错误: {e.code} - {e.message}")
+
+        finally:
+            # === 新增：无论上传成功与否，都要清理产生的本地临时 JPG 文件 ===
+            if temp_jpg_path and os.path.exists(temp_jpg_path):
+                try:
+                    os.remove(temp_jpg_path)
+                    # print("🧹 临时 JPG 文件已清理")
+                except Exception as e:
+                    print(f"⚠️ 清理临时文件失败: {e}")
