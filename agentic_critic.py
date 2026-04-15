@@ -618,24 +618,41 @@ class AgenticImageEditor:
 
         think_prompt = f"""You are a Visual Task Decomposer. 
 
-        [OVERALL OBJECTIVE]:
+        [OVERALL OBJECTIVE]
         {base_instruction}
 
-        Current Progress: Step {current_step} of {total_steps}.{reflection_context}
+        [PROGRESS & REFLECTION CONTEXT]
+        Current Progress: Step {current_step} of {total_steps}.
+        {reflection_context}
 
-        Your job is to compare the current image against the OVERALL OBJECTIVE, identify what is missing or flawed, and output an action-oriented prompt to generate the NEXT part.
+        Your job is to evaluate the current image by combining the [OVERALL OBJECTIVE] with the insights from the 
+        [PROGRESS & REFLECTION CONTEXT]. By comparing the current image against both the original image and the 
+        historical feedback, identify what is missing or flawed, and output an action-oriented prompt to generate the 
+        NEXT part.
 
-        When addressing missing limbs, strictly follow these steps:
-        1. Observe: Closely inspect the residual limb (stump) in the current image.
-        2. Analyze Orientation: Explicitly state the spatial direction the residual limb is pointing (e.g., 'pointing 45-degrees downward to the left' or 'facing directly forward').
-        3. Guide Generation: Incorporate this exact orientation into your action-oriented prompt so the new limb extends smoothly and naturally from the stump's exact trajectory.
-        
+        [STRATEGIC PACING]
+        Do NOT attempt to restore all missing limbs at once. Focus on generating or fixing ONLY ONE limb per step to 
+        ensure high-quality generation. You will fix the rest in subsequent steps.
+
+        [LIMB GENERATION PROTOCOL]
+        When addressing a missing limb, you must strictly follow this workflow:
+        1. Observe: Closely inspect the targeted residual limb (stump) in the current image.
+        2. Analyze Orientation (in thought_process): Estimate and state the general spatial direction the stump is 
+        pointing (e.g., 'pointing downward and slightly to the left', 'extending straight down', or 'facing forward').
+        3. Guide Generation (in edit_prompt): Incorporate this general directional cue into your action prompt so the 
+        new limb extends naturally along the stump's trajectory.
+
         You always need to pay attention to the constraints and enforce them in your plan.
 
         Output ONLY a JSON object:
         {{
-          "thought_process": "Evaluate the image against the objective based on the reflection and decide what to draw or fix next.",
-          "edit_prompt": "An ACTION-FOCUSED prompt describing ONLY how to inpaint or adjust the specific missing limbs to ensure four intact limbs are visible. Ensure it strictly follows the requirements such as angle and position. DO NOT include general scene descriptions (e.g., do not describe the jersey, face, or background)."
+          "thought_process": "Step-by-step evaluation. First, synthesize the [OVERALL OBJECTIVE] with the 
+          [REFLECTION CONTEXT] to define the current priority. Second, select ONE specific limb to work on. 
+          Third, state its general spatial direction based on the stump and decide the adjustments needed.",
+          "edit_prompt": "An ACTION-FOCUSED prompt describing ONLY how to inpaint or adjust the specific 
+          missing limb targeted in this step. Ensure it clearly defines the general direction and position 
+          extending from the stump. DO NOT include general scene descriptions 
+          (e.g., do not describe the jersey, face, or background)."
         }}"""
         # 调用视觉大模型
         resp = MultiModalConversation.call(
