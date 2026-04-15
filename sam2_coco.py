@@ -102,7 +102,7 @@ def segment_subject(image_path, keypoints, pad_ratio=0.3):
         im_buf_arr.tofile(output_path)
         print(f"✅ 成功提取主体并扩图: {output_path}")
         # 🌟 根据你的要求：不在这里修改 keypoints，保持原始坐标系，交给下游校准器处理
-        return output_path
+        return output_path, mask_final
     else:
         raise ValueError("图像编码保存失败")
 

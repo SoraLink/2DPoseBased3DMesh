@@ -63,7 +63,7 @@ def main(args):
 
     print(f"\n[Processing] 开始处理图像: {args.img}")
     kpts_orig, types_orig = read_kpts_annotation(args.img, args.annotation_file)
-    sam2_img_path = segment_subject(args.img, kpts_orig)
+    sam2_img_path, mask = segment_subject(args.img, kpts_orig)
 
     image_url = OSSProcessor().upload_and_get_url(local_file_path=sam2_img_path)
 
@@ -259,8 +259,33 @@ def main(args):
         else:
             raise ValueError("No residual bone cutting tasks found.")
 
-        project_mesh_overlay(args.img, mesh, M_inv, pred_cam)  # 将最终 Mesh 投影回原图坐标系，生成 Overlay
+        out_img_path, pred_mask = project_mesh_overlay(args.img, mesh, M_inv, pred_cam)  # 将最终 Mesh 投影回原图坐标系，生成 Overlay
+        miou_score = calculate_miou(pred_mask, mask)
+        print(f"📊 [量化评估] 掩码 mIoU 评分: {miou_score:.4f}")
 
+        INTACT_MAPPING = {
+            'left_shoulder': 5, 'right_shoulder': 6,
+            'left_elbow': 7, 'right_elbow': 8,
+            'left_hip': 11, 'right_hip': 12,
+            'left_knee': 13, 'right_knee': 14,
+            # 可以根据需要添加更多
+        }
+
+        for task in cut_tasks:
+            # 如果你在 cutter 里存了，可以直接这样取：
+            if 'cut_origin_3d' in task:
+                pred_joints_3d[task['name']] = task['cut_origin_3d']
+            else:
+                # Fallback: 如果拿不到，暂时用 start 和 end 的中点代替以防止报错
+                pred_joints_3d[task['name']] = (task['start_3d'] + task['end_3d']) / 2.0
+
+        RES_MAPPING = {METAINFO['keypoint_info'][i]['name']: i for i in range(23, 31)}
+
+        mpjpe_intact = calculate_2d_mpjpe(pred_joints_3d, kpts_orig, M_inv, pred_cam, INTACT_MAPPING)
+        mpjpe_residual = calculate_2d_mpjpe(pred_joints_3d, kpts_orig, M_inv, pred_cam, RES_MAPPING)
+
+        print(f"📊 [量化评估] 完整关节 2D MPJPE: {mpjpe_intact:.2f} pixels")
+        print(f"📊 [量化评估] 残肢端点 2D MPJPE: {mpjpe_residual:.2f} pixels")
     except Exception as e:
         raise e
 
@@ -374,30 +399,100 @@ def project_mesh_overlay(image_path, mesh, M_inv, pred_cam, focal_length=5000.0,
     if is_success:
         im_buf_arr.tofile(output_path)
         print(f"✅ [Projector] 几何闭环可视化已生成: {output_path}")
-        return output_path
+        return output_path, mask_orig
     else:
         raise ValueError("图像保存失败")
 
 
+def calculate_miou(pred_mask, gt_mask):
+    """
+    计算平均交并比 (mIoU)
+    :param pred_mask: 预测的 2D 掩码 (np.array)
+    :param gt_mask: 真实的 2D 掩码 (np.array)
+    """
+    # 确保转换为二值布尔数组
+    pred_bin = (pred_mask > 127).astype(np.bool_)
+    gt_bin = (gt_mask > 127).astype(np.bool_)
+
+    intersection = np.logical_and(pred_bin, gt_bin).sum()
+    union = np.logical_or(pred_bin, gt_bin).sum()
+
+    if union == 0:
+        return 0.0
+    return float(intersection / union)
+
+
+def calculate_2d_mpjpe(pred_joints_3d, gt_kpts_orig, M_inv, pred_cam, mapping_dict, focal_length=5000.0,
+                       hmr_size=(256, 256)):
+    """
+    计算 2D 重投影误差 (MPJPE)
+    :param pred_joints_3d: 包含 3D 关节坐标的字典 (例如 {'left_shoulder': [x,y,z]})
+    :param gt_kpts_orig: 原始图像的 2D 关键点数组 (N, 3)，包含 [x, y, conf]
+    :param mapping_dict: 映射字典，格式为 { 骨骼名称: 对应的 gt_kpts_orig 索引 }
+    """
+    # 1. 计算 HMR 256 -> 原始坐标的逆矩阵
+    M_inv_augmented = np.vstack([M_inv, [0, 0, 1]])
+    M_hmr_to_orig = np.linalg.inv(M_inv_augmented)[:2, :]
+
+    fx, fy = focal_length, focal_length
+    cx, cy = hmr_size[0] / 2.0, hmr_size[1] / 2.0
+    s, tx, ty = pred_cam[0], pred_cam[1], pred_cam[2]
+    dist_z = (2.0 * fx) / (hmr_size[0] * s)
+
+    errors = []
+
+    for joint_name, gt_idx in mapping_dict.items():
+        if joint_name not in pred_joints_3d:
+            continue
+
+        # 获取 GT 坐标和置信度 (格式: [x, y, conf])
+        gt_x, gt_y, conf = gt_kpts_orig[gt_idx]
+        if conf <= 0:  # 如果点不可见，跳过
+            continue
+
+        vert = pred_joints_3d[joint_name]
+
+        # 2. 3D 坐标叠加相机平移推到镜头前
+        curr_x = vert[0] + tx
+        curr_y = vert[1] + ty
+        curr_z = vert[2] + dist_z
+
+        if curr_z <= 0: continue
+
+        # 3. 透视投影到 256 画布
+        proj_x = fx * (curr_x / curr_z) + cx
+        proj_y = fy * (curr_y / curr_z) + cy
+
+        # 4. 利用仿射逆矩阵映射回原图坐标系
+        pt_256 = np.array([proj_x, proj_y, 1.0])
+        pt_orig = M_hmr_to_orig @ pt_256
+
+        # 5. 计算两点之间的欧式距离（像素误差）
+        err = np.linalg.norm(pt_orig - np.array([gt_x, gt_y]))
+        errors.append(err)
+
+    if len(errors) == 0:
+        return 0.0
+    return float(np.mean(errors))
+
 def get_final_calibration_matrix(kpts_orig, kpts_gen, image_path):
     """
-    量化测试专用版：自动剔除坏点，自适应平移计算，无需手动 Offset
+    量化测试专用版：自动剔除坏点，自适应平移计算，已修复置信度和容忍度问题
     """
     img = cv2.imread(image_path)
     current_img_w = img.shape[1]
     current_img_h = img.shape[0]
 
-    # 🌟 优化 1：引入头部和躯干的全部强刚性特征点
-    # 0:nose, 1:L-eye, 2:R-eye, 3:L-ear, 4:R-ear, 5:L-sho, 6:R-sho, 11:L-hip, 12:R-hip
+    # 1. 引入头部和躯干的全部强刚性特征点
     candidate_indices = [0, 1, 2, 3, 4, 5, 6, 11, 12]
 
     valid_src = []
     valid_dst = []
 
-    # 🌟 优化 2：动态过滤无效点 (防止图片里人头被裁掉导致报错)
+    # 🌟 修复 1：使用 [2] 获取置信度，阈值设为 0.3（MMPose标准）
     for idx in candidate_indices:
-        # 假设置信度或者坐标为 0 代表未检测到
-        if kpts_orig[idx][0] > 1.0 and kpts_gen[idx][0] > 1.0:
+        # 取第3个元素(索引2)作为置信度，滤除大模型没画好或者原图被遮挡的点
+        if kpts_orig[idx][2] > 0.3 and kpts_gen[idx][2] > 0.3:
             valid_src.append(kpts_orig[idx, :2])
             valid_dst.append(kpts_gen[idx, :2])
 
@@ -407,8 +502,23 @@ def get_final_calibration_matrix(kpts_orig, kpts_gen, image_path):
     if len(src) < 3:
         raise ValueError("严重警告：有效对齐锚点不足 3 个，仿射矩阵计算失败，建议跳过该图像！")
 
-    # 🌟 优化 3：使用 RANSAC 算法 (自动找偏移，自动扔掉被大模型画歪的点)
-    M_calib, inliers = cv2.estimateAffinePartial2D(src, dst, method=cv2.RANSAC, ransacReprojThreshold=3.0)
+    # 🌟 修复 2：将 RANSAC 阈值放宽到 20.0 像素，适应大模型的生成误差
+    M_calib, inliers = cv2.estimateAffinePartial2D(
+        src, dst,
+        method=cv2.RANSAC,
+        ransacReprojThreshold=20.0
+    )
+
+    # 🌟 修复 3：兜底机制，防止 RANSAC 极低概率的求解失败返回 None
+    if M_calib is None:
+        print("⚠️ [警告] RANSAC 强对齐失败，退回常规最小二乘法拟合...")
+        M_calib, _ = cv2.estimateAffinePartial2D(src, dst)
+        if M_calib is None:
+            raise ValueError("对齐完全失败，源点和目标点差异过大！")
+
+    # 打印有效对齐点数量，方便你 Debug 观察
+    inlier_count = np.sum(inliers) if inliers is not None else len(src)
+    print(f"📐 [Calibration] 使用了 {len(src)} 个锚点，其中 {inlier_count} 个被认定为可靠点(Inliers)。")
 
     # 独立计算 X 和 Y 的缩放因子，消除 Resize 变形
     scale_x = 256.0 / float(current_img_w)
