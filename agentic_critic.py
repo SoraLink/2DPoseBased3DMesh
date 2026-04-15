@@ -407,9 +407,9 @@ class GeometricRefinerAgent:
         print("=" * 50)
 
         # 1. 提取原图的绝对基准点 (Ground Truth)
-        kpts_orig = self.pose_extractor.extract_31_keypoints('./eval/cropped_baidu_残疾运动员_841.png')
+        kpts_orig = self.pose_extractor.extract_31_keypoints(original_url)
 
-        current_url = './first_try/image_editor_0.jpg'
+        current_url = initial_gen_url
         generated_image_urls = [current_url]
 
         eval_params = self.auto_param_builder.infer_params(kpts_orig)
