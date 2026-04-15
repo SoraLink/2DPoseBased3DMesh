@@ -62,7 +62,7 @@ def main(args):
     geometric_refiner = GeometricRefinerAgent(pose_extractor)
 
     print(f"\n[Processing] 开始处理图像: {args.img}")
-    kpts_orig, types_orig = read_kpts_annotation(args.img, args.annotation_file)
+    kpts_orig, kpts_orig_format, types_orig = read_kpts_annotation(args.img, args.annotation_file)
     sam2_img_path = segment_subject(args.img, kpts_orig)
 
     image_url = OSSProcessor().upload_and_get_url(local_file_path=sam2_img_path)
@@ -76,7 +76,7 @@ def main(args):
     generated_image_urls = image_editor.run(image_url)
     last_generated_image_url = generated_image_urls[-1]
     save_image_from_url(generated_image_urls, "image_editor", save_dir)
-    generated_image_urls = geometric_refiner.run(kpts_orig, last_generated_image_url)
+    generated_image_urls = geometric_refiner.run(kpts_orig_format, last_generated_image_url)
     save_image_from_url(generated_image_urls, "geometric_refiner", save_dir)
     final_image_url = generated_image_urls[-1]
 
@@ -228,7 +228,7 @@ def main(args):
                 res_name = METAINFO['keypoint_info'][i]['name']
 
                 # 获取 2D 坐标 (假设 kpts_orig 的格式是 [x, y, conf])
-                pt_2d = kpts_orig[i][0:2]
+                pt_2d = kpts_orig_format[i][0:2]
                 # 查表找到对应的 3D 骨骼起点和终点
                 if res_name in RES_BONE_MAPPING:
                     start_joint_name, end_joint_name = RES_BONE_MAPPING[res_name]
