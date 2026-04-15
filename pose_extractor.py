@@ -80,7 +80,8 @@ def read_kpts_annotation(image_path, annotation_path):
     for ann in coco_data['annotations']:
         if ann['image_id'] == image_id:
             kpts = ann['keypoints']
-            return kpts
+            types = ann['keypoint_types']
+            return kpts, types
 
 
 if __name__ == "__main__":
