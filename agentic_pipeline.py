@@ -84,6 +84,7 @@ def generate_able_bodied_image(input_image_path: str, save_path: str) -> str:
             n=1,
             watermark=False,
             prompt_extend=True,
+            temperature=0.1,
             size="1024*1024",  # 可根据需要修改分辨率
         )
 

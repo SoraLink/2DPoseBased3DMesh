@@ -135,65 +135,115 @@ def debug_visualize_alignment(kpts_orig, kpts_aligned, save_dir="./debug"):
     print(f"👁️ [Debug] 点位对比图已保存至: {save_path} (蓝:原图, 红:对齐后)")
 
 
-def draw_pose_skeleton(kpts, save_dir="./debug_skeletons", img_shape=(1024, 1024, 3)):
+def draw_pose_skeleton(kpts_aligned, kpts_gen, save_dir="./debug_skeletons", img_shape=(1024, 1024, 3)):
     """
-    根据 METAINFO 字典自动绘制连线和关键点，支持自定义颜色。
+    根据 METAINFO 字典自动绘制连线和关键点。
+    新增功能：自动将残肢线段按 kpts_gen 中的对应肢体长度进行拉伸。
     """
     os.makedirs(save_dir, exist_ok=True)
     canvas = np.zeros(img_shape, dtype=np.uint8)
 
-    # 1. 建立名字到索引的映射字典 (例如：{'nose': 0, 'left_eye': 1, ...})
+    # 1. 建立名字到索引的映射字典
     name_to_id = {info['name']: info['id'] for info in METAINFO['keypoint_info'].values()}
 
-    # 2. 遍历 skeleton_info，绘制连线
+    # 为了不污染传进来的原始对齐数据，我们 copy 一份用来画图
+    kpts_to_draw = kpts_aligned.copy()
+
+    # ==========================================
+    # 🌟 新增：残肢拉伸逻辑
+    # 映射格式：'残肢点名字': ('对应的关节点起点', '对应的关节点终点')
+    # 例如：左大腿残肢点，对应的其实是左髋到左膝的长度
+    # ==========================================
+    RES_LENGTH_MAPPING = {
+        'L-Elbow-Res-Above': ('left_shoulder', 'left_elbow'),
+        'R-Elbow-Res-Above': ('right_shoulder', 'right_elbow'),
+        'L-Elbow-Res-Below': ('left_elbow', 'left_wrist'),
+        'R-Elbow-Res-Below': ('right_elbow', 'right_wrist'),
+        'L-Knee-Res-Above': ('left_hip', 'left_knee'),
+        'R-Knee-Res-Above': ('right_hip', 'right_knee'),
+        'L-Knee-Res-Below': ('left_knee', 'left_ankle'),
+        'R-Knee-Res-Below': ('right_knee', 'right_ankle')
+    }
+
+    def is_visible(pt):
+        # 辅助函数：判断点是否有效 (没有v维度，或者v!=0)
+        return len(pt) < 3 or pt[2] != 0
+
+    for res_name, (gen_start_name, gen_end_name) in RES_LENGTH_MAPPING.items():
+        if res_name in name_to_id and gen_start_name in name_to_id and gen_end_name in name_to_id:
+            res_id = name_to_id[res_name]
+            start_id = name_to_id[gen_start_name]  # 锚点 (如肩膀、髋部)
+            end_id = name_to_id[gen_end_name]  # 目标点 (如手肘、膝盖)
+
+            # 确保索引不越界，且相关点都有效 (v!=0)
+            if (res_id < len(kpts_to_draw) and start_id < len(kpts_to_draw) and
+                    end_id < len(kpts_gen) and start_id < len(kpts_gen)):
+
+                # 检查所有参与计算的点是否可见
+                if (is_visible(kpts_to_draw[res_id]) and is_visible(kpts_to_draw[start_id]) and
+                        is_visible(kpts_gen[start_id]) and is_visible(kpts_gen[end_id])):
+
+                    # A. 计算 kpts_gen 中生成肢体的目标长度
+                    gen_start_pt = kpts_gen[start_id][:2]
+                    gen_end_pt = kpts_gen[end_id][:2]
+                    target_length = np.linalg.norm(gen_end_pt - gen_start_pt)
+
+                    # B. 计算 kpts_aligned 中残肢的方向向量
+                    align_start_pt = kpts_to_draw[start_id][:2]
+                    align_res_pt = kpts_to_draw[res_id][:2]
+                    direction_vec = align_res_pt - align_start_pt
+                    current_length = np.linalg.norm(direction_vec)
+
+                    # C. 拉长坐标：起点 + 单位方向向量 * 目标长度
+                    if current_length > 1e-5:  # 防止除以0
+                        unit_vec = direction_vec / current_length
+                        new_res_pt = align_start_pt + unit_vec * target_length
+
+                        # 把拉长后的新坐标写回用来画图的数组中
+                        kpts_to_draw[res_id][:2] = new_res_pt
+    # ==========================================
+
+    # 2. 遍历 skeleton_info，绘制连线 (注意：这里要用 kpts_to_draw 了！)
     for skel_id, skel_info in METAINFO['skeleton_info'].items():
         name1, name2 = skel_info['link']
 
-        # 确保这两个名字在我们的关键点定义里
         if name1 in name_to_id and name2 in name_to_id:
             p1_idx = name_to_id[name1]
             p2_idx = name_to_id[name2]
 
-            # 确保索引没有越界
-            if p1_idx < len(kpts) and p2_idx < len(kpts):
-                p1, p2 = kpts[p1_idx], kpts[p2_idx]
+            if p1_idx < len(kpts_to_draw) and p2_idx < len(kpts_to_draw):
+                p1, p2 = kpts_to_draw[p1_idx], kpts_to_draw[p2_idx]
 
-                # 过滤不可见点 (v=0)
-                if (len(p1) >= 3 and p1[2] == 0) or (len(p2) >= 3 and p2[2] == 0):
+                if not is_visible(p1) or not is_visible(p2):
                     continue
 
                 pt1 = (int(p1[0]), int(p1[1]))
                 pt2 = (int(p2[0]), int(p2[1]))
 
-                # 提取 RGB 颜色并转换为 OpenCV 用的 BGR
                 r, g, b = skel_info['color']
                 color_bgr = (int(b), int(g), int(r))
 
-                # 画线
                 cv2.line(canvas, pt1, pt2, color_bgr, 4)
 
-    # 3. 遍历 keypoint_info，绘制点 (盖在连线上面)
+    # 3. 遍历 keypoint_info，绘制点 (注意：使用 kpts_to_draw)
     for kp_id, kp_info in METAINFO['keypoint_info'].items():
-        if kp_id < len(kpts):
-            pt = kpts[kp_id]
+        if kp_id < len(kpts_to_draw):
+            pt = kpts_to_draw[kp_id]
 
-            # 过滤不可见点
-            if len(pt) >= 3 and pt[2] == 0:
+            if not is_visible(pt):
                 continue
 
             pos = (int(pt[0]), int(pt[1]))
 
-            # 提取 RGB 颜色并转换为 BGR
             r, g, b = kp_info['color']
             color_bgr = (int(b), int(g), int(r))
 
-            # 画点
             cv2.circle(canvas, pos, 6, color_bgr, -1)
 
-    # 保存图片
     filename = f"target_skeleton_{int(time.time() * 1000)}.jpg"
     local_path = os.path.join(save_dir, filename)
     cv2.imwrite(local_path, canvas)
+
     return os.path.abspath(local_path)
 
 class PoseGeometricEvaluator:
@@ -384,6 +434,8 @@ class GeometricRefinerAgent:
                 messages=messages,
                 stream=False,
                 n=1,
+                seed=42,
+                guidance_scale=7.0,
                 watermark=False,
                 negative_prompt="shifting torso, changing joint angles, redrawing background, missing limbs",
                 prompt_extend=False
@@ -448,7 +500,7 @@ class GeometricRefinerAgent:
 
                     # 3.2 在本地画出骨架图
                     # 注意：如果你的图片不是 1024x1024，建议这里动态传入 cv2.imread(本地原图).shape
-                    local_skeleton_path = draw_pose_skeleton(kpts_target_aligned, img_shape=(1024, 1024, 3))
+                    local_skeleton_path = draw_pose_skeleton(kpts_target_aligned, kpts_gen, img_shape=(1024, 1024, 3))
 
                     # 3.3 上传到 OSS 获取 URL
                     skeleton_oss_url = self.oss_processor.upload_and_get_url(local_file_path=local_skeleton_path)
@@ -528,6 +580,8 @@ class AgenticImageEditor:
                 stream=False,
                 n=1,
                 watermark=False,
+                seed=42,
+                guidance_scale=7.0,
                 # 你的负向提示词完整保留
                 negative_prompt="deformed torso, changing existing limb angles, distorted joints, redrawing entire person, extra fingers, anatomical nonsense, missing limbs",
                 # 强烈建议设为 False，防止模型自己乱加词破坏你的严苛医学约束
@@ -585,6 +639,7 @@ class AgenticImageEditor:
                     {"text": think_prompt}
                 ]
             }],
+            temperature=0.1,
             response_format={'type': 'json_object'}
         )
 
@@ -625,6 +680,7 @@ class AgenticImageEditor:
                     {"text": eval_prompt}
                 ]
             }],
+            temperature=0.1,
             response_format={'type': 'json_object'}
         )
 
