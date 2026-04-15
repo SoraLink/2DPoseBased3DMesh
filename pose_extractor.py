@@ -81,6 +81,9 @@ def read_kpts_annotation(image_path, annotation_path):
         if ann['image_id'] == image_id:
             kpts = ann['keypoints']
             types = ann['keypoint_types']
+            for i, kpt_type in enumerate(types):
+                if kpt_type != 0:
+                    kpts[i, 2] = 0.0
             return kpts, types
 
 

@@ -453,13 +453,10 @@ class GeometricRefinerAgent:
         except Exception as e:
             raise RuntimeError(f"❌ 大模型 API 调用崩溃: {str(e)}")
 
-    def run(self, original_url, initial_gen_url, mask_url=None):
+    def run(self, kpts_orig, initial_gen_url, mask_url=None):
         print("\n" + "=" * 50)
         print(f"🔬 启动第二阶段: 几何精细校准 Agent")
         print("=" * 50)
-
-        # 1. 提取原图的绝对基准点 (Ground Truth)
-        kpts_orig = self.pose_extractor.extract_31_keypoints(original_url)
 
         current_url = initial_gen_url
         generated_image_urls = [current_url]
