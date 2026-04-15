@@ -24,7 +24,7 @@ def show_points(coords, labels, ax, marker_size=375):
         ax.scatter(pos_points[:, 0], pos_points[:, 1], color='green', marker='*', s=marker_size, edgecolor='white',
                    linewidth=1.25)
 
-def segment_subject(image_path, keypoints):
+def segment_subject(image_path, keypoints, pad_ratio=0.3):
     sam2_checkpoint = "./models/sam2/sam2.1_hiera_large.pt"
     model_cfg = "configs/sam2.1/sam2.1_hiera_l.yaml"
     points_coords = []
@@ -69,35 +69,41 @@ def segment_subject(image_path, keypoints):
         )
 
     # ================= 新增：裁剪人物并保存透明背景图 =================
-    print("正在裁剪人物并生成透明背景图像...")
-    # 将 RGB 图像转换为带有 Alpha 通道的 RGBA 图像
-    image_rgba = cv2.cvtColor(image, cv2.COLOR_RGB2RGBA)
+    print("正在提取人物并生成扩展的 JPG 画布...")
 
-    # 获取掩码（通常是 True/False 或 1/0），并将其映射到 0-255 的透明度
-    # masks[0] 对应置信度最高的那个 mask
-    alpha_channel = (masks[0] * 255).astype(np.uint8)
+    # 1. 提取人物像素（黑色背景）
+    mask_bool = masks[0].astype(bool)
+    image_subject_only = np.zeros_like(image, dtype=np.uint8)
+    image_subject_only[mask_bool] = image[mask_bool]
 
-    # 将透明度通道赋值给 RGBA 图像的第四个通道
-    image_rgba[:, :, 3] = alpha_channel
+    # 2. 计算扩图尺寸 (Padding)
+    h, w = image.shape[:2]
+    p_h, p_w = int(h * pad_ratio), int(w * pad_ratio)
 
-    # 构造输出路径（替换为 .png 格式以支持透明度）
+    # 3. 四周填充黑边 (BORDER_CONSTANT 默认就是 0，即黑色)
+    image_padded = cv2.copyMakeBorder(
+        image_subject_only,
+        p_h, p_h, p_w, p_w,
+        cv2.BORDER_CONSTANT,
+        value=[0, 0, 0]
+    )
+
+    # 4. 构造输出路径 (.jpg)
     image_name = os.path.basename(image_path)
     image_dir = os.path.dirname(image_path)
-    output_image_name = "cropped_" + image_name.rsplit('.', 1)[0] + ".png"
-    output_path = os.path.join(image_dir, output_image_name)
+    output_path = os.path.join(image_dir, "padded_" + image_name.rsplit('.', 1)[0] + ".jpg")
 
-    # 将 RGBA 转为 BGRA 用于 OpenCV 保存
-    image_bgra = cv2.cvtColor(image_rgba, cv2.COLOR_RGBA2BGRA)
+    # 5. 防弹法保存高质量 JPG (RGB 转回 BGR 再保存)
+    image_bgr = cv2.cvtColor(image_padded, cv2.COLOR_RGB2BGR)
+    is_success, im_buf_arr = cv2.imencode(".jpg", image_bgr, [int(cv2.IMWRITE_JPEG_QUALITY), 100])
 
-    # 使用 imencode 防弹法保存，完美绕过中文路径报错
-    is_success, im_buf_arr = cv2.imencode(".png", image_bgra)
     if is_success:
         im_buf_arr.tofile(output_path)
-        print(f"✅ 裁剪成功！透明背景人像已保存至: {output_path}")
+        print(f"✅ 扩图完成！已保存至: {output_path}")
+        # 这里只返回路径，因为你不需要在这个阶段改 keypoints
         return output_path
     else:
-        raise ValueError("Failed to crop image.")
-    # =================================================================
+        raise ValueError("Failed to save padded image.")
 
 
 def main():
