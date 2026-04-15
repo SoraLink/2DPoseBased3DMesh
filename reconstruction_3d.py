@@ -34,6 +34,7 @@ class ReconstructionEngine:
         with torch.no_grad():
             out = self.model({'img': batch_images})
             pred_vertices_tensor = out['pred_vertices'][0]
+            pred_cam = out['pred_cam'][0].cpu().numpy()
             vertices = pred_vertices_tensor.cpu().numpy()
             faces = self.model.smpl.faces
 
@@ -67,4 +68,4 @@ class ReconstructionEngine:
             'right_wrist': joints_3d[21],
         }
 
-        return save_path, pred_joints_dict
+        return save_path, pred_joints_dict, pred_cam

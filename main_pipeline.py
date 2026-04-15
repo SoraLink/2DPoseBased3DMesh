@@ -77,7 +77,7 @@ def main(args):
     last_generated_image_url = generated_image_urls[-1]
     save_image_from_url(generated_image_urls, "image_editor", save_dir)
     generated_image_urls = geometric_refiner.run(kpts_orig, last_generated_image_url)
-    save_image_from_url(generated_image_urls, "geometric_refiner", save_dir)
+    all_path = save_image_from_url(generated_image_urls, "geometric_refiner", save_dir)
     final_image_url = generated_image_urls[-1]
 
     # ==========================================
@@ -106,7 +106,7 @@ def main(args):
         base_name = os.path.basename(args.img).split('.')[0]
         mesh_save_path = os.path.join(args.mesh_save_dir, f"{base_name}_mesh.obj")
 
-        mesh_save_path, pred_joints_3d = reconstructor.predict_mesh(img_pil, mesh_save_path)
+        mesh_save_path, pred_joints_3d, pred_cam = reconstructor.predict_mesh(img_pil, mesh_save_path)
         print(f"✅ 3D Mesh 已保存至: {mesh_save_path}")
         # ==========================================
         # 6. 精确截肢 (Multi-Mesh Truncation)
@@ -221,7 +221,7 @@ def main(args):
 
         cut_tasks = []
         kpts_gen = pose_extractor.extract_31_keypoints(final_image_url)  # 重新检测生成图的关键点
-        M_inv = get_final_calibration_matrix(kpts_orig, kpts_gen=kpts_gen)  # 这里暂时传 None，后续可以改成实际生成图的关键点
+        M_inv = get_final_calibration_matrix(kpts_orig, kpts_gen=kpts_gen, image_path=all_path[-1])  # 这里暂时传 None，后续可以改成实际生成图的关键点
         # 遍历 METAINFO 中的最后 8 个残肢点 (ID 23 到 30)
         for i in range(23, 31):
             # 判断: 只有 type == 0 才是有效残肢点，且确保坐标数组够长
@@ -249,7 +249,7 @@ def main(args):
         if cut_tasks:
             h, w = img_bgr.shape[:2]
             # 初始化截肢器 (焦距 5000 根据 HMR/CLIFF 默认设置)
-            mesh_cutter = ResidualMeshCutter(focal_length=5000.0, img_center=(w / 2, h / 2))
+            mesh_cutter = ResidualMeshCutter(focal_length=5000.0, img_center=(128.0, 128.0))
 
             mesh = mesh_cutter.process_multiple_cuts(
                 mesh_path=mesh_save_path,
@@ -259,13 +259,13 @@ def main(args):
         else:
             raise ValueError("No residual bone cutting tasks found.")
 
-        project_mesh_overlay(args.img, mesh, M_inv)  # 将最终 Mesh 投影回原图坐标系，生成 Overlay
+        project_mesh_overlay(args.img, mesh, M_inv, pred_cam)  # 将最终 Mesh 投影回原图坐标系，生成 Overlay
 
     except Exception as e:
         raise e
 
 
-def project_mesh_overlay(image_path, mesh, M_inv, focal_length=5000.0, hmr_size=(256, 256)):
+def project_mesh_overlay(image_path, mesh, M_inv, pred_cam, focal_length=5000.0, hmr_size=(256, 256)):
     """
     将 3D Mesh (HMR space, e.g., SMPL) 精准投影回原始图片坐标系，生成绿色 Overlay。
     :param image_path: 原始图片路径 (incomplete)
@@ -292,34 +292,46 @@ def project_mesh_overlay(image_path, mesh, M_inv, focal_length=5000.0, hmr_size=
     # ================================================================
     # 第二步：将 3D Mesh 投影到 HMR 虚拟画布 (3D -> 2D 256x256)
     # ================================================================
-    print("[Visualization] 正在将 3D 拓扑投影至 HMR 画布...")
     fx, fy = focal_length, focal_length
     cx, cy = hmr_size[0] / 2.0, hmr_size[1] / 2.0
 
-    vertices = mesh.vertices
-    projected_vertices = np.zeros((len(vertices), 2), dtype=np.int32)
-    # 默认设在画布外远端
-    projected_vertices[:] = -1e6
+    # 提取相机参数：s 是缩放（对应深度），tx, ty 是平移
+    s, tx, ty = pred_cam[0], pred_cam[1], pred_cam[2]
 
-    # 执行 3D -> 2D 投影，只处理相机前方的点
+    # 计算 3D 人体应该在的虚拟深度 Z
+    # 公式：Z = 2 * f / (img_size * scale)
+    dist_z = (2.0 * fx) / (hmr_size[0] * s)
+
+    vertices = mesh.vertices
+    projected_pts = np.zeros((len(vertices), 2), dtype=np.int32)
+
     for i, vert in enumerate(vertices):
-        if vert[2] > 0.0:
-            X, Y, Z = vert[0], vert[1], vert[2]
-            projected_vertices[i, 0] = int(fx * (X / Z) + cx)
-            projected_vertices[i, 1] = int(fy * (Y / Z) + cy)
+        # 🌟 关键变换：根据相机参数把顶点挪到正确位置
+        # X' = X + tx, Y' = Y + ty, Z' = Z + dist_z
+        # 注意：tx, ty 在 HMR2 里通常是相对于中心的偏移
+        curr_x = vert[0] + tx
+        curr_y = vert[1] + ty
+        curr_z = vert[2] + dist_z
+
+        # 执行透视投影
+        projected_pts[i, 0] = int(fx * (curr_x / curr_z) + cx)
+        projected_pts[i, 1] = int(fy * (curr_y / curr_z) + cy)
 
     # 创建 HMR 画布的二值遮罩 (256x256)
     mask_256 = np.zeros(hmr_size, dtype=np.uint8)
 
     # 将 Faces 的顶点索引映射到投影后的 2D 坐标
     faces_int = mesh.faces.astype(np.int32)
-
     # 🌟 优化：只绘制那些三个顶点都在相机前方的面，防止虚边
-    valid_faces_mask = (projected_vertices[faces_int] > -1e5).all(axis=2).all(axis=1)
-    projected_faces = projected_vertices[faces_int[valid_faces_mask]]
+    valid_faces = faces_int
 
-    # 暴力填充面，生成完整的 segmentation mask
-    cv2.fillPoly(mask_256, projected_faces, 255)
+    # 🌟 修改绘制逻辑：cv2.fillPoly 需要一个 list of arrays
+    # 为了性能，我们直接用投影后的点集
+    for face in valid_faces:
+        # 获取该面的三个 2D 顶点
+        pts = projected_pts[face].reshape((-1, 1, 2))
+        cv2.fillPoly(mask_256, [pts], 255)
+
     cv2.imwrite("debug_1_mask_256.jpg", mask_256)
     print(f"DEBUG: 256掩码已保存，白色像素点数: {np.sum(mask_256 > 0)}")
     # ================================================================
@@ -366,12 +378,14 @@ def project_mesh_overlay(image_path, mesh, M_inv, focal_length=5000.0, hmr_size=
     else:
         raise ValueError("图像保存失败")
 
-def get_final_calibration_matrix(kpts_orig, kpts_gen):
+def get_final_calibration_matrix(kpts_orig, kpts_gen, image_path):
     """
     kpts_orig: 原始 1024 图像的关键点
     kpts_gen:  大模型生成 1024 图像后的关键点 (重新检测得到的)
     """
     # 选取肩膀和髋部点 (COCO: 5,6,11,12)
+    img = cv2.imread(image_path)
+    current_img_w = img.shape[1]
     indices = [5, 6, 11, 12]
     src = kpts_orig[indices, :2]
     dst = kpts_gen[indices, :2]
@@ -380,7 +394,7 @@ def get_final_calibration_matrix(kpts_orig, kpts_gen):
     M_calib, _ = cv2.estimateAffinePartial2D(src, dst)
 
     # 2. 叠加【生成图(比如1024) -> HMR(256)】的缩放
-    scale_factor = 256.0 / 1024.0  # 假设你生成图是 1024
+    scale_factor = 256.0 / float(current_img_w)  # 假设你生成图是 1024
     S = np.array([[scale_factor, 0, 0],
                   [0, scale_factor, 0]], dtype=np.float32)
 
@@ -391,6 +405,7 @@ def get_final_calibration_matrix(kpts_orig, kpts_gen):
     return M_hmr_inv
 
 def save_image_from_url(urls, source, save_dir):
+    all_path = []
     os.makedirs(save_dir, exist_ok=True)
     for i, url in enumerate(urls):
         filename = f"{source}_{i}.jpg"
@@ -406,9 +421,11 @@ def save_image_from_url(urls, source, save_dir):
                 file.write(response.content)
 
             print(f"💾 成功保存到本地: {save_path}")
+            all_path.append(save_path)
 
         except requests.exceptions.RequestException as e:
             print(f"❌ 下载失败: {e}")
+    return all_path
 
 if __name__ == "__main__":
     args = parse_args()
