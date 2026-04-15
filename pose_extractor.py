@@ -87,8 +87,8 @@ def read_kpts_annotation(image_path, annotation_path):
                 ori_kpts[i, :2] = [x, y]
                 ori_kpts[i, 2] = v
                 if kpt_type != 0:
-                    kpts[i, 2] = 0.0
-            return kpts, types
+                    ori_kpts[i, 2] = 0.0
+            return ori_kpts, types
 
 
 if __name__ == "__main__":
