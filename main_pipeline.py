@@ -220,7 +220,8 @@ def main(args):
         }
 
         cut_tasks = []
-
+        kpts_gen = pose_extractor.extract_31_keypoints(final_image_url)  # 重新检测生成图的关键点
+        M_inv = get_final_calibration_matrix(kpts_orig, kpts_gen=kpts_gen)  # 这里暂时传 None，后续可以改成实际生成图的关键点
         # 遍历 METAINFO 中的最后 8 个残肢点 (ID 23 到 30)
         for i in range(23, 31):
             # 判断: 只有 type == 0 才是有效残肢点，且确保坐标数组够长
@@ -252,13 +253,39 @@ def main(args):
 
             mesh_cutter.process_multiple_cuts(
                 mesh_path=mesh_save_path,
-                cut_tasks=cut_tasks
+                cut_tasks=cut_tasks,
+                M_inv=M_inv,
             )
         else:
             print("🔍 未检测到任何有效的残肢点 (types 均不为 0)，保留完整 Mesh。")
 
     except Exception as e:
         raise e
+
+
+def get_final_calibration_matrix(kpts_orig, kpts_gen):
+    """
+    kpts_orig: 原始 1024 图像的关键点
+    kpts_gen:  大模型生成 1024 图像后的关键点 (重新检测得到的)
+    """
+    # 选取肩膀和髋部点 (COCO: 5,6,11,12)
+    indices = [5, 6, 11, 12]
+    src = np.array([[kpts_orig[i * 3], kpts_orig[i * 3 + 1]] for i in indices], dtype=np.float32)
+    dst = np.array([[kpts_gen[i * 3], kpts_gen[i * 3 + 1]] for i in indices], dtype=np.float32)
+
+    # 1. 计算【原始 -> 生成图】的仿射校准
+    M_calib, _ = cv2.estimateAffinePartial2D(src, dst)
+
+    # 2. 叠加【生成图(比如1024) -> HMR(256)】的缩放
+    scale_factor = 256.0 / 1024.0  # 假设你生成图是 1024
+    S = np.array([[scale_factor, 0, 0],
+                  [0, scale_factor, 0]], dtype=np.float32)
+
+    # 最终矩阵: P_256 = S * [M_calib | 1] * P_orig
+    # 这里简单处理：先做校准变换，再做缩放
+    M_hmr_inv = S @ np.vstack([M_calib, [0, 0, 1]])
+
+    return M_hmr_inv
 
 def save_image_from_url(urls, source, save_dir):
     os.makedirs(save_dir, exist_ok=True)

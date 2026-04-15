@@ -1,16 +1,37 @@
 import os
+import cv2
 import numpy as np
 import trimesh
+import networkx as nx
 
 
 class ResidualMeshCutter:
-    def __init__(self, focal_length=5000.0, img_center=(512, 512)):
+    def __init__(self, focal_length=5000.0, img_center=(128.0, 128.0)):
+        """
+        初始化截肢手术刀
+        :param focal_length: HMR 2.0 内部默认焦距 (相对于 256 空间)
+        :param img_center: HMR 2.0 内部投影中心 (256/2 = 128)
+        """
         self.fx = focal_length
         self.fy = focal_length
         self.cx, self.cy = img_center
         self.cam_origin = np.array([0.0, 0.0, 0.0])
 
+    def _apply_calibration(self, pt_2d, M_inv):
+        """
+        将原始图片的 2D 坐标通过仿射矩阵 M_inv 转换到 HMR 的 256 坐标系下
+        M_inv 应该包含: 1. 躯干对齐的位移/缩放  2. 从原图到 256 的缩放
+        """
+        if M_inv is None:
+            return pt_2d
+        # 转换为齐次坐标 [x, y, 1]
+        point = np.array([pt_2d[0], pt_2d[1], 1.0])
+        # 计算变换: P_hmr = M_inv * P_orig
+        new_pt = M_inv @ point
+        return new_pt[:2]
+
     def _get_ray_direction(self, pt_2d):
+        """基于校准后的 2D 点计算 3D 射线方向"""
         u, v = pt_2d
         ray_x = (u - self.cx) / self.fx
         ray_y = (v - self.cy) / self.fy
@@ -19,6 +40,7 @@ class ResidualMeshCutter:
         return ray_dir / np.linalg.norm(ray_dir)
 
     def _calculate_exact_cut_proportion(self, ray_dir, bone_start, bone_end):
+        """计算 2D 射线与 3D 骨骼线段之间的最近点比例 (Lambda)"""
         bone_vec = bone_end - bone_start
         v1 = ray_dir
         v2 = bone_vec
@@ -31,95 +53,77 @@ class ResidualMeshCutter:
         e = np.dot(v2, w0)
 
         denominator = a * c - b * b
-        if denominator < 1e-6:
+        if denominator < 1e-6:  # 平行情况
             return 0.5
 
         t_c = (a * e - b * d) / denominator
         return np.clip(t_c, 0.0, 1.0)
 
-    def process_multiple_cuts(self, mesh_path, cut_tasks):
-        import networkx as nx  # trimesh 内部的图论引擎
-
-        print(f"\n🔪 [Mesh Cutter] 开始处理网格: {mesh_path}")
+    def process_multiple_cuts(self, mesh_path, cut_tasks, M_inv=None):
+        """
+        执行多处截肢任务
+        :param cut_tasks: 列表，每个元素含 {'name', 'pt_2d', 'start_3d', 'end_3d'}
+        :param M_inv: 2x3 仿射变换矩阵，负责将原始坐标系对齐到 256 空间
+        """
+        print(f"\n🔪 [Mesh Cutter] 正在手术，目标 Mesh: {mesh_path}")
         if not cut_tasks:
-            print("   -> 没有检测到有效的残肢点，跳过切割。")
+            print("   -> 无切割任务，跳过。")
             return mesh_path
 
-        # 加载 Mesh
         mesh = trimesh.load(mesh_path, process=False)
 
         for task in cut_tasks:
-            print(f"   -> 正在切割部位: {task['name']}")
-            ray_dir = self._get_ray_direction(task['pt_2d'])
-            lambda_cut = self._calculate_exact_cut_proportion(ray_dir, task['start_3d'], task['end_3d'])
-            print(f"      比例 (Lambda): {lambda_cut:.4f}")
+            print(f"   -> 处理部位: {task['name']}")
 
-            # 算出精确的切点和法向量
+            # 1. 坐标系对齐
+            pt_calibrated = self._apply_calibration(task['pt_2d'], M_inv)
+
+            # 2. 射线投影计算
+            ray_dir = self._get_ray_direction(pt_calibrated)
+            lambda_cut = self._calculate_exact_cut_proportion(ray_dir, task['start_3d'], task['end_3d'])
+
+            # 3. 确定 3D 切割面 (法向量指向要切除的肢体末端)
             cut_origin = task['start_3d'] + lambda_cut * (task['end_3d'] - task['start_3d'])
             cut_normal = task['start_3d'] - task['end_3d']
             cut_normal = cut_normal / np.linalg.norm(cut_normal)
 
-            # ==========================================
-            # 🌟 新增：局部拓扑切割逻辑
-            # ==========================================
-            # 1. 计算所有顶点到平面的距离，找出所有“负半区”顶点
+            # 4. 局部拓扑切除 (基于孤岛检测，防止误伤躯干)
             signed_dist = np.dot(mesh.vertices - cut_origin, cut_normal)
             neg_indices = np.where(signed_dist < 0)[0]
 
             if len(neg_indices) == 0:
-                print("      ⚠️ 未发现可切除顶点。")
                 continue
 
-            # 2. 构建拓扑图，并寻找这片顶点中的“独立孤岛” (Connected Components)
             graph = mesh.vertex_adjacency_graph
             subgraph = graph.subgraph(neg_indices)
             components = list(nx.connected_components(subgraph))
 
-            # 3. 找出距离切口最近的那个孤岛 (即目标残肢)
+            # 寻找离切口最近的肢体孤岛
             target_component = []
             min_dist = float('inf')
-
             for comp in components:
                 comp_list = list(comp)
-                # 计算该孤岛中所有顶点距离切割原点的最小距离
                 dists = np.linalg.norm(mesh.vertices[comp_list] - cut_origin, axis=1)
                 curr_min = np.min(dists)
-
                 if curr_min < min_dist:
                     min_dist = curr_min
                     target_component = comp_list
 
-            # 4. 安全阈值：如果这个孤岛确实就在切口附近(例如误差 < 15cm)，就删掉它
+            # 安全阈值：只切除离切点 15cm 以内的孤岛
             if min_dist < 0.15:
-                # 1. 制作一个布尔掩码，标记哪些顶点是要保留的
                 keep_vertex_mask = np.ones(len(mesh.vertices), dtype=bool)
                 keep_vertex_mask[target_component] = False
 
-                # 2. 核心修复：过滤三角面！只有当一个面的 3 个顶点都要被保留时，这个面才留下
+                # 更新面：只有三个点都保留的面才留下
                 keep_face_mask = keep_vertex_mask[mesh.faces].all(axis=1)
-
-                # 3. 先更新(删除)无效的面
                 mesh.update_faces(keep_face_mask)
-
-                # 4. 最后清理掉那些没有面连接的孤立顶点 (也就是我们的残肢顶点)
                 mesh.remove_unreferenced_vertices()
-
-                print(f"      ✅ 成功安全切除局部肢体 (清理了对应的面和顶点)")
+                print(f"      ✅ 切除成功 (Lambda: {lambda_cut:.2f})")
             else:
-                print(f"      ⚠️ 孤岛距离切口过远 ({min_dist:.2f}m)，为防止误伤跳过切割。")
-        # 统一封口
-        # try:
-        #     mesh.fill_holes()
-        #     print("   -> 成功完成切口自动封口 (Watertight)")
-        # except Exception as e:
-        #     print(f"   ⚠️ 自动封口警告: {e}")
+                print(f"      ⚠️ 坐标校准后仍偏离肢体，放弃切割以保护主体。")
 
-        # 保存文件
-        base_dir = os.path.dirname(mesh_path)
-        file_name = os.path.basename(mesh_path).split('.')[0]
-        output_path = os.path.join(base_dir, f"{file_name}_truncated.obj")
-
+        # 保存结果
+        output_path = mesh_path.replace(".obj", "_truncated.obj")
         mesh.export(output_path)
-        print(f"✅ [Mesh Cutter] 所有截肢任务完成，已保存至: {output_path}")
-
+        print(f"✅ [Mesh Cutter] 手术结束，保存至: {output_path}")
         return output_path
