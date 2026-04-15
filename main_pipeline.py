@@ -345,7 +345,7 @@ def project_mesh_overlay(image_path, mesh, M_inv, focal_length=5000.0, hmr_size=
 
     # 只有 mask 覆盖的区域进行混合
     mask_bool = (mask_orig > 127)
-    cv2.addWeighted(overlay_color, alpha, output_image, 1 - alpha, 0, output_image, dst=output_image, dtype=cv2.CV_8U)
+    output_image = cv2.addWeighted(overlay_color, alpha, output_image, 1 - alpha, 0, dst=output_image)
     # 将 mask 之外的区域变回原图
     output_image[~mask_bool] = original_image[~mask_bool]
 

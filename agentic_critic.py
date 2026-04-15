@@ -506,7 +506,7 @@ class GeometricRefinerAgent:
                     # 3.4 组装 prompt，附带 correction 信息
                     current_prompt = self.refine_instruction
                     # 3.5 调用大模型 (传入原图 + OSS骨架图)
-                    time.sleep(1)
+                    time.sleep(3)
                     current_url = self.edit_image(current_url, current_prompt, skeleton_url=skeleton_oss_url,
                                                   mask_url=mask_url)
                     generated_image_urls.append(current_url)
