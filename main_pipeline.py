@@ -131,11 +131,9 @@ def save_image_from_url(urls, source, save_dir):
                 file.write(response.content)
 
             print(f"💾 成功保存到本地: {save_path}")
-            return save_path
 
         except requests.exceptions.RequestException as e:
             print(f"❌ 下载失败: {e}")
-            return None
 
 if __name__ == "__main__":
     args = parse_args()
