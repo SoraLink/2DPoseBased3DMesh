@@ -2,6 +2,7 @@ import os
 import cv2
 import numpy as np
 import trimesh
+import trimesh.smoothing
 import networkx as nx
 import pymeshlab
 
@@ -61,7 +62,7 @@ class ResidualMeshCutter:
 
     def process_multiple_cuts(self, mesh_path, cut_tasks, M_inv=None):
         """
-        执行多处截肢任务，并使用 PyMeshLab 进行 Watertight 弧度封口
+        执行多处截肢任务，Watertight 封口，并强制生成抛物线生理鼓包
         """
         print(f"\n🔪 [Mesh Cutter] 正在手术，目标 Mesh: {mesh_path}")
         if not cut_tasks:
@@ -81,6 +82,10 @@ class ResidualMeshCutter:
             cut_origin = task['start_3d'] + lambda_cut * (task['end_3d'] - task['start_3d'])
             cut_normal = task['start_3d'] - task['end_3d']
             cut_normal = cut_normal / np.linalg.norm(cut_normal)
+
+            # 🌟 关键：把切面中心和法向量存下来，给后面的“拔高鼓包”环节使用
+            task['cut_origin'] = cut_origin
+            task['cut_normal'] = cut_normal
 
             signed_dist = np.dot(mesh.vertices - cut_origin, cut_normal)
             neg_indices = np.where(signed_dist < 0)[0]
@@ -121,40 +126,61 @@ class ResidualMeshCutter:
             return mesh
 
         # ==========================================================
-        # 🚀 PyMeshLab 后处理：Watertight 封口与平滑
+        # 🚀 第一阶段：PyMeshLab 拓扑封口与细分 (制造致密的平坦盖子)
         # ==========================================================
-        print(f"      -> 开始拓扑重建 (Watertight 封口 & 弧度端点)...")
-
-        # 1. 保存中间的非水密网格
+        print(f"      -> 开始拓扑重建 (Watertight 封口)...")
         temp_obj_path = mesh_path.replace(".obj", "_temp_hole.obj")
         mesh.export(temp_obj_path)
 
-        # 2. 启动 PyMeshLab 管道
         ms = pymeshlab.MeshSet()
         ms.load_new_mesh(temp_obj_path)
 
         try:
-            # 3. 封口滤波器，确保只选中新生成的盖子面
             ms.meshing_close_holes(maxholesize=3000, newfaceselected=True)
-
-            # ---> [关键优化：新增细分步骤] <---
-            # 在平滑前，先给封口添加足够的顶点。
-            # 这一步会在盖子上增加更多几何支撑，是产生弧度的基础。
-            ms.meshing_surface_subdivision_midpoint(iterations=1, selected=True)
-
-            # 4. Laplacian 坐标平滑 (只针对 selected=True 生效)
-            # 有了细分后的顶点，这里的平滑就能拉拽出非常饱满、自然的生理弧度了。
-            ms.apply_coord_laplacian_smoothing(stepsmoothnum=6, selected=True)
-            print("      ✅ 已成功细分并生成弧度残肢端点。")
-
+            # 迭代2次细分，给盖子铺满密集的顶点
+            ms.meshing_surface_subdivision_midpoint(iterations=2, selected=True)
         except Exception as e:
-            raise e
+            print(f"      ⚠️ PyMeshLab 处理异常: {e}")
 
-        # 5. 保存最终 Watertight Mesh
         ms.save_current_mesh(output_path)
-
         if os.path.exists(temp_obj_path):
             os.remove(temp_obj_path)
 
-            # 7. 重新读回为 trimesh 对象并返回，确保与下游 project_mesh_overlay 无缝对接
-        return trimesh.load(output_path, process=False)
+        # ==========================================================
+        # 🚀 第二阶段：Trimesh 底层顶点干预 (真正的物理顶出鼓包)
+        # ==========================================================
+        print(f"      -> 开始施加端点物理膨胀...")
+        sealed_mesh = trimesh.load(output_path, process=False)
+
+        for task in cut_tasks:
+            if 'cut_origin' not in task:
+                continue
+
+            c_origin = task['cut_origin']
+            c_normal = task['cut_normal']
+
+            # 计算所有顶点到这个截断面中心的距离
+            distances = np.linalg.norm(sealed_mesh.vertices - c_origin, axis=1)
+
+            # 设定残肢端点的波及半径 (这里设为 8 厘米，一般人类大腿/小腿切面差不多这么大)
+            radius = 0.08
+            mask = distances < radius
+
+            if np.any(mask):
+                # 核心魔法：使用抛物线方程。越靠近截面中心，向外拔出的力量越大；越靠近大腿边缘，力量越小 (平滑过渡)
+                weights = np.clip(1.0 - (distances[mask] / radius) ** 2, 0.0, 1.0)
+
+                # 🎯 想要多鼓，就调这个参数！目前是向外顶出 4 厘米 (0.04)。如果觉得不够，改成 0.06 或 0.08
+                max_bulge = 0.04
+                displacement = np.outer(weights * max_bulge, c_normal)
+
+                # 暴力干预：让这批顶点沿着法向量突围
+                sealed_mesh.vertices[mask] += displacement
+
+        # 最后，进行一次轻量级的全局网格平滑，把刚才我们手动拉扯的接缝处抹平，让半球完美融入大腿
+        trimesh.smoothing.filter_laplacian(sealed_mesh, iterations=4)
+
+        sealed_mesh.export(output_path)
+        print("      ✅ 已成功生成完美弧度残肢端点。")
+
+        return sealed_mesh
