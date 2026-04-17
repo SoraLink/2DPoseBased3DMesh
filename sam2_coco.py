@@ -148,11 +148,14 @@ def segment_subject2(image_path, output_dir, keypoints, types, predictor, pad_ra
         masks, scores, logits = predictor.predict(
             point_coords=input_points,
             point_labels=input_labels,
-            multimask_output=False
+            multimask_output=True
         )
 
-    # 4. Mask 后处理 (解决马赛克空洞)
-    mask_raw = (masks[0] * 255).astype(np.uint8)
+    areas = np.sum(masks, axis=(1, 2))
+    largest_idx = np.argmax(areas)
+
+    # 强制使用最大的 Mask
+    mask_raw = (masks[largest_idx] * 255).astype(np.uint8)
     kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (5, 5))
     mask_closed = cv2.morphologyEx(mask_raw, cv2.MORPH_CLOSE, kernel, iterations=2)
 
