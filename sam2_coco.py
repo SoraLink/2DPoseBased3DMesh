@@ -229,13 +229,10 @@ def main():
 
     for img_path in image_files:
         # 🌟 修复 3：创建独立的子文件夹 (e.g., ./test_sam2/image_001/)
-        current_output_dir = Path(output_path) / img_path.stem
-        current_output_dir.mkdir(parents=True, exist_ok=True)
-
         try:
             kpts_orig, types_orig = read_kpts_annotation(str(img_path), annotation_file)
             # 传入 predictor 和独立的输出目录
-            segment_subject2(str(img_path), str(current_output_dir), kpts_orig, predictor)
+            segment_subject2(str(img_path), str(output_path), kpts_orig, predictor)
         except Exception as e:
             print(f"❌ 处理 {img_path.name} 时发生错误: {e}")
 
