@@ -61,33 +61,27 @@ class ResidualMeshCutter:
 
     def process_multiple_cuts(self, mesh_path, cut_tasks, M_inv=None):
         """
-        执行多处截肢任务
-        :param cut_tasks: 列表，每个元素含 {'name', 'pt_2d', 'start_3d', 'end_3d'}
-        :param M_inv: 2x3 仿射变换矩阵，负责将原始坐标系对齐到 256 空间
+        执行多处截肢任务，并使用 PyMeshLab 进行 Watertight 弧度封口
         """
         print(f"\n🔪 [Mesh Cutter] 正在手术，目标 Mesh: {mesh_path}")
         if not cut_tasks:
             print("   -> 无切割任务，跳过。")
-            return mesh_path
+            return trimesh.load(mesh_path, process=False)
 
         mesh = trimesh.load(mesh_path, process=False)
+        has_cut = False
 
         for task in cut_tasks:
             print(f"   -> 处理部位: {task['name']}")
 
-            # 1. 坐标系对齐
             pt_calibrated = self._apply_calibration(task['pt_2d'], M_inv)
-
-            # 2. 射线投影计算
             ray_dir = self._get_ray_direction(pt_calibrated)
             lambda_cut = self._calculate_exact_cut_proportion(ray_dir, task['start_3d'], task['end_3d'])
 
-            # 3. 确定 3D 切割面 (法向量指向要切除的肢体末端)
             cut_origin = task['start_3d'] + lambda_cut * (task['end_3d'] - task['start_3d'])
             cut_normal = task['start_3d'] - task['end_3d']
             cut_normal = cut_normal / np.linalg.norm(cut_normal)
 
-            # 4. 局部拓扑切除 (基于孤岛检测，防止误伤躯干)
             signed_dist = np.dot(mesh.vertices - cut_origin, cut_normal)
             neg_indices = np.where(signed_dist < 0)[0]
 
@@ -98,7 +92,6 @@ class ResidualMeshCutter:
             subgraph = graph.subgraph(neg_indices)
             components = list(nx.connected_components(subgraph))
 
-            # 寻找离切口最近的肢体孤岛
             target_component = []
             min_dist = float('inf')
             for comp in components:
@@ -109,21 +102,60 @@ class ResidualMeshCutter:
                     min_dist = curr_min
                     target_component = comp_list
 
-            # 安全阈值：只切除离切点 15cm 以内的孤岛
             if min_dist < 0.15:
                 keep_vertex_mask = np.ones(len(mesh.vertices), dtype=bool)
                 keep_vertex_mask[target_component] = False
 
-                # 更新面：只有三个点都保留的面才留下
                 keep_face_mask = keep_vertex_mask[mesh.faces].all(axis=1)
                 mesh.update_faces(keep_face_mask)
                 mesh.remove_unreferenced_vertices()
                 print(f"      ✅ 切除成功 (Lambda: {lambda_cut:.2f})")
+                has_cut = True
             else:
                 print(f"      ⚠️ 坐标校准后仍偏离肢体，放弃切割以保护主体。")
 
-        # 保存结果
         output_path = mesh_path.replace(".obj", "_truncated.obj")
-        mesh.export(output_path)
+
+        if not has_cut:
+            mesh.export(output_path)
+            return mesh
+
+        # ==========================================================
+        # 🚀 PyMeshLab 后处理：Watertight 封口与平滑
+        # ==========================================================
+        print(f"      -> 开始拓扑重建 (Watertight 封口)...")
+
+        # 1. 保存中间的非水密网格（带有截断面空洞）
+        temp_obj_path = mesh_path.replace(".obj", "_temp_hole.obj")
+        mesh.export(temp_obj_path)
+
+        # 2. 启动 PyMeshLab 管道
+        ms = pymeshlab.MeshSet()
+        ms.load_new_mesh(temp_obj_path)
+
+        try:
+            # 3. 封口滤波器
+            # maxholesize=3000: 足够大，能包容大腿根部级别的空洞
+            # newfaceselected=True: 神仙参数，只选中刚刚补上去的盖子面
+            ms.meshing_close_holes(maxholesize=3000, newfaceselected=True)
+
+            # 4. Laplacian 坐标平滑
+            # 只针对 selected=True (刚才补的盖子) 进行平滑
+            # steps=3/4 通常能拉出一个非常自然的半球状生理弧度
+            ms.apply_coord_laplacian_smoothing(steps=4, selected=True)
+            print("      ✅ 拓扑空洞已修复，并生成弧度端点。")
+
+        except Exception as e:
+            print(f"      ⚠️ PyMeshLab 封口处理异常: {e}")
+
+        # 5. 保存最终 Watertight Mesh
+        ms.save_current_mesh(output_path)
+
+        # 6. 清理临时文件
+        if os.path.exists(temp_obj_path):
+            os.remove(temp_obj_path)
+
         print(f"✅ [Mesh Cutter] 手术结束，保存至: {output_path}")
-        return mesh
+
+        # 重新加载为 trimesh 对象返回，保证跟你之前的 Pipeline 兼容
+        return trimesh.load(output_path, process=False)
