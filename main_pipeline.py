@@ -257,13 +257,7 @@ def predict(args, img_path, output_path, pose_extractor, reconstructor, geometri
         miou_score = calculate_miou(pred_mask, mask)
         print(f"📊 [量化评估] 掩码 mIoU 评分: {miou_score:.4f}")
 
-        INTACT_MAPPING = {
-            'left_shoulder': 5, 'right_shoulder': 6,
-            'left_elbow': 7, 'right_elbow': 8,
-            'left_hip': 11, 'right_hip': 12,
-            'left_knee': 13, 'right_knee': 14,
-            # 可以根据需要添加更多
-        }
+        INTACT_MAPPING = {METAINFO['keypoint_info'][i]['name']: i for i in range(0, 17)}
 
         for task in cut_tasks:
             # 如果你在 cutter 里存了，可以直接这样取：
