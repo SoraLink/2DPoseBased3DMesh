@@ -123,9 +123,9 @@ class ResidualMeshCutter:
         # ==========================================================
         # 🚀 PyMeshLab 后处理：Watertight 封口与平滑
         # ==========================================================
-        print(f"      -> 开始拓扑重建 (Watertight 封口)...")
+        print(f"      -> 开始拓扑重建 (Watertight 封口 & 弧度端点)...")
 
-        # 1. 保存中间的非水密网格（带有截断面空洞）
+        # 1. 保存中间的非水密网格
         temp_obj_path = mesh_path.replace(".obj", "_temp_hole.obj")
         mesh.export(temp_obj_path)
 
@@ -134,28 +134,27 @@ class ResidualMeshCutter:
         ms.load_new_mesh(temp_obj_path)
 
         try:
-            # 3. 封口滤波器
-            # maxholesize=3000: 足够大，能包容大腿根部级别的空洞
-            # newfaceselected=True: 神仙参数，只选中刚刚补上去的盖子面
+            # 3. 封口滤波器，确保只选中新生成的盖子面
             ms.meshing_close_holes(maxholesize=3000, newfaceselected=True)
 
-            # 4. Laplacian 坐标平滑
-            # 只针对 selected=True (刚才补的盖子) 进行平滑
-            # steps=3/4 通常能拉出一个非常自然的半球状生理弧度
-            ms.apply_coord_laplacian_smoothing(steps=4, selected=True)
-            print("      ✅ 拓扑空洞已修复，并生成弧度端点。")
+            # ---> [关键优化：新增细分步骤] <---
+            # 在平滑前，先给封口添加足够的顶点。
+            # 这一步会在盖子上增加更多几何支撑，是产生弧度的基础。
+            ms.meshing_surface_subdivision_midpoint(iterations=1, selected=True)
+
+            # 4. Laplacian 坐标平滑 (只针对 selected=True 生效)
+            # 有了细分后的顶点，这里的平滑就能拉拽出非常饱满、自然的生理弧度了。
+            ms.apply_coord_laplacian_smoothing(steps=6, selected=True)
+            print("      ✅ 已成功细分并生成弧度残肢端点。")
 
         except Exception as e:
-            print(f"      ⚠️ PyMeshLab 封口处理异常: {e}")
+            print(f"      ⚠️ PyMeshLab 处理异常: {e}")
 
         # 5. 保存最终 Watertight Mesh
         ms.save_current_mesh(output_path)
 
-        # 6. 清理临时文件
         if os.path.exists(temp_obj_path):
             os.remove(temp_obj_path)
 
-        print(f"✅ [Mesh Cutter] 手术结束，保存至: {output_path}")
-
-        # 重新加载为 trimesh 对象返回，保证跟你之前的 Pipeline 兼容
+            # 7. 重新读回为 trimesh 对象并返回，确保与下游 project_mesh_overlay 无缝对接
         return trimesh.load(output_path, process=False)
