@@ -24,7 +24,7 @@ def parse_args():
 
     # 基础输入参数
     parser.add_argument('--img_dir', type=str,
-                        default='./data/eval',
+                        default='./eval',
                         help='Dir of the input images')
 
     # PoseExtractor 参数 (必填或提供默认路径)
@@ -68,7 +68,7 @@ def predict(args, img_path, output_path, pose_extractor, reconstructor, geometri
     generated_image_urls = image_editor.run(image_url)
     last_generated_image_url = generated_image_urls[-1]
     save_image_from_url(generated_image_urls, "image_editor", output_path)
-    generated_image_urls = geometric_refiner.run(kpts_orig, last_generated_image_url)
+    generated_image_urls = geometric_refiner.run(kpts_orig, last_generated_image_url, output_path)
     all_path = save_image_from_url(generated_image_urls, "geometric_refiner", output_path)
     final_image_url = generated_image_urls[-1]
 
@@ -597,12 +597,13 @@ def main(args):
             print(f"📊 当前平均 mIoU: {avg_miou:.4f}")
             print(f"📊 当前平均 MPJPE (Intact): {avg_intact:.2f} px")
             print(f"📊 当前平均 MPJPE (Residual): {avg_residual:.2f} px")
+            break
 
         except Exception as e:
             print(f"❌ 处理图片 {img_path.name} 时发生错误: {str(e)}")
             with open(Path(args.output_dir) / "error_log.txt", "a") as f:
                 f.write(f"{img_path.name}: {str(e)}\n")
-            continue
+            raise e
 
         # 循环结束后打印最终报告
     print("\n" + "=" * 30)
