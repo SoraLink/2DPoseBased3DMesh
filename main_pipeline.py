@@ -56,7 +56,7 @@ def predict(args, img_path, output_path, pose_extractor, reconstructor, geometri
 
     print(f"\n[Processing] 开始处理图像: {img_path}")
     kpts_orig, types_orig = read_kpts_annotation(img_path, args.annotation_file)
-    sam2_img_path, mask = segment_subject(img_path, kpts_orig)
+    sam2_img_path, mask = segment_subject(img_path, output_path, kpts_orig)
 
     image_url = OSSProcessor().upload_and_get_url(local_file_path=sam2_img_path)
 
