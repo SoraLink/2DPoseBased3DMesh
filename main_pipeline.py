@@ -251,7 +251,7 @@ def predict(args, img_path, output_path, pose_extractor, reconstructor, geometri
         else:
             raise ValueError("No residual bone cutting tasks found.")
 
-        out_img_path, pred_mask = project_mesh_overlay(img_path, mesh, M_inv, pred_cam)  # 将最终 Mesh 投影回原图坐标系，生成 Overlay
+        out_img_path, pred_mask = project_mesh_overlay(img_path, mesh, M_inv, pred_cam, output_path)  # 将最终 Mesh 投影回原图坐标系，生成 Overlay
         sam2_img_path, mask = sam2_predictor.segment_subject2(img_path, output_path, kpts, types_orig)
 
         miou_score = calculate_miou(pred_mask, mask)
@@ -286,7 +286,7 @@ def predict(args, img_path, output_path, pose_extractor, reconstructor, geometri
         raise e
 
 
-def project_mesh_overlay(image_path, mesh, M_inv, pred_cam, focal_length=5000.0, hmr_size=(256, 256)):
+def project_mesh_overlay(image_path, mesh, M_inv, pred_cam, output_dir, focal_length=5000.0, hmr_size=(256, 256)):
     """
     将 3D Mesh (HMR space, e.g., SMPL) 精准投影回原始图片坐标系，生成绿色 Overlay。
     :param image_path: 原始图片路径 (incomplete)
@@ -353,7 +353,7 @@ def project_mesh_overlay(image_path, mesh, M_inv, pred_cam, focal_length=5000.0,
         pts = projected_pts[face].reshape((-1, 1, 2))
         cv2.fillPoly(mask_256, [pts], 255)
 
-    cv2.imwrite("debug_1_mask_256.jpg", mask_256)
+    # cv2.imwrite("debug_1_mask_256.jpg", mask_256)
     print(f"DEBUG: 256掩码已保存，白色像素点数: {np.sum(mask_256 > 0)}")
     # ================================================================
     # 第三步：将 Mask 变形对齐原图，并进行 Alpha 混合
@@ -368,7 +368,7 @@ def project_mesh_overlay(image_path, mesh, M_inv, pred_cam, focal_length=5000.0,
     # 2. 🌟 关键：利用 M_hmr_to_orig 将 256 Mask 变形到原图尺寸和位置
     # 这一步将大模型生成的肢体误差完美消化。
     mask_orig = cv2.warpAffine(mask_256, M_hmr_to_orig, (w_orig, h_orig), flags=cv2.INTER_LINEAR)
-    cv2.imwrite("debug_2_mask_orig.jpg", mask_orig)
+    # cv2.imwrite("debug_2_mask_orig.jpg", mask_orig)
     print(f"DEBUG: 变换后掩码已保存，白色像素点数: {np.sum(mask_orig > 0)}")
     # 3. 创建彩色 Overlay (绿色)
     overlay_color = np.zeros_like(original_image)
@@ -387,7 +387,9 @@ def project_mesh_overlay(image_path, mesh, M_inv, pred_cam, focal_length=5000.0,
     # ================================================================
     # 第四步：保存高质量结果
     # ================================================================
-    output_path = image_path.replace(".jpg", "_projection.jpg").replace(".png", "_projection.jpg")
+    image_name = os.path.basename(image_path)
+    image_name = image_name.replace(".jpg", "_projection.jpg").replace(".png", "_projection.jpg")
+    output_path = os.path.join(output_dir, image_name)
 
     encode_param = [int(cv2.IMWRITE_JPEG_QUALITY), 100]
     is_success, im_buf_arr = cv2.imencode(".jpg", output_image, encode_param)

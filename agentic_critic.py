@@ -5,6 +5,7 @@ import re
 import time
 
 import cv2
+import requests
 from dashscope import MultiModalConversation
 import numpy as np
 
@@ -305,9 +306,9 @@ class PoseGeometricEvaluator:
         dot_product = np.clip(np.dot(unit_v1, unit_v2), -1.0, 1.0)
         return math.degrees(math.acos(dot_product))
 
-    def evaluate(self, kpts_orig, kpts_gen, stable_keys, residual_vecs_list, generated_vecs_list, torso_indices):
+    def evaluate(self, kpts_orig, kpts_gen, stable_keys, residual_vecs_list, generated_vecs_list, torso_indices, output_dir):
         kpts_aligned, _ = self.align_poses(kpts_orig, kpts_gen, torso_indices)
-        debug_visualize_alignment(kpts_orig, kpts_aligned)
+        debug_visualize_alignment(kpts_orig, kpts_aligned, save_dir=output_dir)
         error_reasons = []
         correction_steps = []
 
@@ -414,8 +415,8 @@ class GeometricRefinerAgent:
         if skeleton_url:
             content_list.append({"image": skeleton_url})
 
-        if mask_url:
-            content_list.append({"image": mask_url})
+        # if mask_url:
+        #     content_list.append({"image": mask_url})
 
         content_list.append({"text": prompt.strip()})
 
@@ -454,10 +455,18 @@ class GeometricRefinerAgent:
         except Exception as e:
             raise RuntimeError(f"❌ 大模型 API 调用崩溃: {str(e)}")
 
-    def run(self, kpts_orig, initial_gen_url, mask_url=None):
+    def run(self, kpts_orig, initial_gen_url, output_dir, mask_url=None):
         print("\n" + "=" * 50)
         print(f"🔬 启动第二阶段: 几何精细校准 Agent")
         print("=" * 50)
+        try:
+            response = requests.get(initial_gen_url, timeout=15)
+            response.raise_for_status()
+        except requests.exceptions.RequestException as e:
+            raise RuntimeError(f"❌ 无法下载图像 URL: {e}")
+
+        image_array = np.asarray(bytearray(response.content), dtype=np.uint8)
+        img = cv2.imdecode(image_array, cv2.IMREAD_COLOR)
 
         current_url = initial_gen_url
         generated_image_urls = [current_url]
@@ -477,7 +486,8 @@ class GeometricRefinerAgent:
                 stable_keys=eval_params["stable_keys"],
                 residual_vecs_list=eval_params["residual_vecs_list"],
                 generated_vecs_list=eval_params["generated_vecs_list"],
-                torso_indices=eval_params["torso_indices"]
+                torso_indices=eval_params["torso_indices"],
+                ourput_dir=output_dir
             )
 
             if eval_res["passed"]:
@@ -498,7 +508,8 @@ class GeometricRefinerAgent:
 
                     # 3.2 在本地画出骨架图
                     # 注意：如果你的图片不是 1024x1024，建议这里动态传入 cv2.imread(本地原图).shape
-                    local_skeleton_path = draw_pose_skeleton(kpts_target_aligned, kpts_gen, img_shape=(1024, 1024, 3))
+
+                    local_skeleton_path = draw_pose_skeleton(kpts_target_aligned, kpts_gen, save_dir=output_dir, img_shape=img.shape)
 
                     # 3.3 上传到 OSS 获取 URL
                     skeleton_oss_url = self.oss_processor.upload_and_get_url(local_file_path=local_skeleton_path)
