@@ -367,7 +367,7 @@ class GeometricRefinerAgent:
         # 精细微调的专用基础指令（强调用第二张图作为骨架参考）
         self.refine_instruction = """
         [Task: Geometric Limb Calibration]
-        Objective: Micro-adjust the posture of the newly generated limb in the main image to strictly match the provided reference skeleton image.
+        Objective: adjust the posture of the newly generated limb in the main image to strictly match the provided reference skeleton image.
 
         [Strict Rules]
         1. Look at the SECOND image (the skeleton graph). This is your exact target pose.
@@ -496,36 +496,35 @@ class GeometricRefinerAgent:
             else:
                 print(f"⚠️ [校准未达标] {eval_res['reason']}")
 
-            if i < self.max_iterations:
-                print("🔧 生成对齐骨架图，上传 OSS 并提交重新编辑...")
-                try:
-                    # 3.1 产生对齐后的目标骨架点 (orig 适配到当前 gen)
-                    kpts_target_aligned = self.align_orig_to_gen(
-                        kpts_orig,
-                        kpts_gen,
-                        eval_params["torso_indices"]
-                    )
+            print("🔧 生成对齐骨架图，上传 OSS 并提交重新编辑...")
+            try:
+                # 3.1 产生对齐后的目标骨架点 (orig 适配到当前 gen)
+                kpts_target_aligned = self.align_orig_to_gen(
+                    kpts_orig,
+                    kpts_gen,
+                    eval_params["torso_indices"]
+                )
 
-                    # 3.2 在本地画出骨架图
-                    # 注意：如果你的图片不是 1024x1024，建议这里动态传入 cv2.imread(本地原图).shape
+                # 3.2 在本地画出骨架图
+                # 注意：如果你的图片不是 1024x1024，建议这里动态传入 cv2.imread(本地原图).shape
 
-                    local_skeleton_path = draw_pose_skeleton(kpts_target_aligned, kpts_gen, save_dir=output_dir, img_shape=img.shape)
+                local_skeleton_path = draw_pose_skeleton(kpts_target_aligned, kpts_gen, save_dir=output_dir, img_shape=img.shape)
 
-                    # 3.3 上传到 OSS 获取 URL
-                    skeleton_oss_url = self.oss_processor.upload_and_get_url(local_file_path=local_skeleton_path)
-                    print(f"☁️ 骨架图已上传至 OSS: {skeleton_oss_url}")
+                # 3.3 上传到 OSS 获取 URL
+                skeleton_oss_url = self.oss_processor.upload_and_get_url(local_file_path=local_skeleton_path)
+                print(f"☁️ 骨架图已上传至 OSS: {skeleton_oss_url}")
 
-                    # 3.4 组装 prompt，附带 correction 信息
-                    current_prompt = self.refine_instruction
-                    # 3.5 调用大模型 (传入原图 + OSS骨架图)
-                    time.sleep(3)
-                    current_url = self.edit_image(current_url, current_prompt, skeleton_url=skeleton_oss_url,
-                                                  mask_url=mask_url)
-                    generated_image_urls.append(current_url)
+                # 3.4 组装 prompt，附带 correction 信息
+                current_prompt = self.refine_instruction
+                # 3.5 调用大模型 (传入原图 + OSS骨架图)
+                time.sleep(3)
+                current_url = self.edit_image(current_url, current_prompt, skeleton_url=skeleton_oss_url,
+                                              mask_url=mask_url)
+                generated_image_urls.append(current_url)
 
-                except Exception as e:
-                    print(f"❌ 微调中断: {e}")
-                    raise e
+            except Exception as e:
+                print(f"❌ 微调中断: {e}")
+                raise e
             else:
                 print("🛑 已达最大校准次数，返回当前最优微调结果。")
 
