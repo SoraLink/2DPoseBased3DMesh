@@ -487,7 +487,7 @@ class GeometricRefinerAgent:
                 residual_vecs_list=eval_params["residual_vecs_list"],
                 generated_vecs_list=eval_params["generated_vecs_list"],
                 torso_indices=eval_params["torso_indices"],
-                ourput_dir=output_dir
+                output_dir=output_dir
             )
 
             if eval_res["passed"]:
