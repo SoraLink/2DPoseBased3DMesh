@@ -171,7 +171,7 @@ class ResidualMeshCutter:
                 weights = np.clip(1.0 - (distances[mask] / radius) ** 2, 0.0, 1.0)
 
                 # 🎯 想要多鼓，就调这个参数！目前是向外顶出 4 厘米 (0.04)。如果觉得不够，改成 0.06 或 0.08
-                max_bulge = 0.04
+                max_bulge = 0.06
                 displacement = np.outer(weights * max_bulge, -c_normal)
 
                 # 暴力干预：让这批顶点沿着法向量突围
