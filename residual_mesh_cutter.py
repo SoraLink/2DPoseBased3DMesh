@@ -144,11 +144,11 @@ class ResidualMeshCutter:
 
             # 4. Laplacian 坐标平滑 (只针对 selected=True 生效)
             # 有了细分后的顶点，这里的平滑就能拉拽出非常饱满、自然的生理弧度了。
-            ms.apply_coord_laplacian_smoothing(steps=6, selected=True)
+            ms.apply_coord_laplacian_smoothing(stepsmoothnum=6, selected=True)
             print("      ✅ 已成功细分并生成弧度残肢端点。")
 
         except Exception as e:
-            print(f"      ⚠️ PyMeshLab 处理异常: {e}")
+            raise e
 
         # 5. 保存最终 Watertight Mesh
         ms.save_current_mesh(output_path)
