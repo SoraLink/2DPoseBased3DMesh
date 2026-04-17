@@ -181,17 +181,23 @@ def segment_subject2(image_path, output_dir, keypoints, types, predictor, pad_ra
     # =======================================================
     for i, pt in enumerate(keypoints):
         x, y, v = pt[0], pt[1], pt[2]
-
+        pt_type = types[i]
         # 只绘制置信度大于 0 (或你需要的阈值) 的点
         if v > 0:
             # 核心：因为图像四周加了黑边，原本的坐标必须加上 offset
             shifted_x = int(x + p_w)
             shifted_y = int(y + p_h)
+            if pt_type == 0:
+                inner_color = (0, 255, 0)  # 绿色：正样本 (SAM Label = 1)
+            elif pt_type == 1:
+                inner_color = (0, 0, 255)  # 红色：负样本 (SAM Label = 0)
+            else:
+                inner_color = (255, 0, 0)  # 蓝色：忽略点或其他 (types == 2)
 
             # 画一个带白边的绿色实心圆，方便在黑底和人物衣服上都能看清
-            cv2.circle(image_padded_bgr, (shifted_x, shifted_y), radius=6, color=(255, 255, 255), thickness=2)  # 外白边
-            cv2.circle(image_padded_bgr, (shifted_x, shifted_y), radius=4, color=(0, 255, 0), thickness=-1)  # 内部实心绿
-
+            cv2.circle(image_padded_bgr, (shifted_x, shifted_y), radius=6, color=(255, 255, 255), thickness=2)
+            # 画实心内圆
+            cv2.circle(image_padded_bgr, (shifted_x, shifted_y), radius=4, color=inner_color, thickness=-1)
             # 可选：如果想标出关键点的 ID，可以解开下面这行的注释
             # cv2.putText(image_padded_bgr, str(i), (shifted_x + 5, shifted_y - 5), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 255), 1)
     # =======================================================
