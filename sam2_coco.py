@@ -79,7 +79,7 @@ def segment_subject(image_path, output_path, keypoints, pad_ratio=0.3):
     mask_bool = (mask_final > 0)
 
     # 6. 提取人物 (黑底)
-    image_subject_only = np.zeros_like(image_rgb)
+    image_subject_only = np.full_like(image_rgb, 255)
     image_subject_only[mask_bool] = image_rgb[mask_bool]
 
     # 7. 扩图 (Padding)
