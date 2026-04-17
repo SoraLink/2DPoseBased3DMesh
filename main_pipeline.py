@@ -278,6 +278,8 @@ def predict(args, img_path, output_path, pose_extractor, reconstructor, geometri
 
         print(f"📊 [量化评估] 完整关节 2D MPJPE: {mpjpe_intact:.2f} pixels")
         print(f"📊 [量化评估] 残肢端点 2D MPJPE: {mpjpe_residual:.2f} pixels")
+
+        return miou_score, mpjpe_intact, mpjpe_residual
     except Exception as e:
         raise e
 
@@ -547,6 +549,10 @@ def save_image_from_url(urls, source, save_dir):
     return all_path
 
 def main(args):
+    miou_total = 0
+    mpjpe_intact_total = 0
+    mpjpe_residual_total = 0
+    success_count = 0
     pose_extractor = PoseExtractor(config_file=args.pose_config,
                                    checkpoint_file=args.pose_ckpt,
                                    device=args.device)
@@ -563,16 +569,44 @@ def main(args):
     for img_path in image_files:
         current_output_dir = Path(args.output_dir) / img_path.stem
         current_output_dir.mkdir(parents=True, exist_ok=True)
+
         try:
-            print(f"\n[Main] 📥 正在处理第 {image_files.index(img_path) + 1}/{len(image_files)} 张: {img_path.name}")
-            predict(args, str(img_path), str(current_output_dir),
-                    pose_extractor, reconstructor, geometric_refiner, image_editor)
+            print(
+                f"\n[Main] 📥 正在处理第 {success_count + 1} 张成功样本 (总进度: {image_files.index(img_path) + 1}/{len(image_files)}): {img_path.name}")
+
+            miou, intact, residual = predict(args, str(img_path), str(current_output_dir),
+                                             pose_extractor, reconstructor, geometric_refiner, image_editor)
+
+            # 累加分数
+            miou_total += miou
+            mpjpe_intact_total += intact
+            mpjpe_residual_total += residual
+            success_count += 1  # 🌟 只有 predict 成功运行后才加 1
+
+            # 计算平均值 (使用 success_count 避免除以零)
+            avg_miou = miou_total / success_count
+            avg_intact = mpjpe_intact_total / success_count
+            avg_residual = mpjpe_residual_total / success_count
+
+            print(f"✅ {img_path.name} 处理完成")
+            print(f"📊 当前平均 mIoU: {avg_miou:.4f}")
+            print(f"📊 当前平均 MPJPE (Intact): {avg_intact:.2f} px")
+            print(f"📊 当前平均 MPJPE (Residual): {avg_residual:.2f} px")
+
         except Exception as e:
-            # 记录错误但不中断循环
             print(f"❌ 处理图片 {img_path.name} 时发生错误: {str(e)}")
             with open(Path(args.output_dir) / "error_log.txt", "a") as f:
                 f.write(f"{img_path.name}: {str(e)}\n")
             continue
+
+        # 循环结束后打印最终报告
+    print("\n" + "=" * 30)
+    print(f"🚀 全部处理完成！成功样本数: {success_count}")
+    if success_count > 0:
+        print(f"🏆 最终平均 mIoU: {miou_total / success_count:.4f}")
+        print(f"🏆 最终平均 MPJPE (Intact): {mpjpe_intact_total / success_count:.2f}")
+        print(f"🏆 最终平均 MPJPE (Residual): {mpjpe_residual_total / success_count:.2f}")
+    print("=" * 30)
 
 if __name__ == "__main__":
     args = parse_args()
