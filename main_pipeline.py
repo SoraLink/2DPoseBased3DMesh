@@ -45,7 +45,6 @@ def parse_args():
 
 
 def predict(args, img_path, output_path, pose_extractor, reconstructor, geometric_refiner, image_editor):
-    image_name = os.path.basename(img_path)
     print("====== 🚀 Neuro-Symbolic Agentic 3D Pipeline ======")
 
     if not os.path.exists(img_path):
@@ -55,7 +54,7 @@ def predict(args, img_path, output_path, pose_extractor, reconstructor, geometri
     # 1. 初始化所有类 (传入 argparse 解析好的参数)
 
     print(f"\n[Processing] 开始处理图像: {img_path}")
-    kpts_orig, types_orig = read_kpts_annotation(img_path, args.annotation_file)
+    kpts_orig, kpts, types_orig = read_kpts_annotation(img_path, args.annotation_file)
     sam2_img_path, mask = segment_subject(img_path, output_path, kpts_orig)
 
     image_url = OSSProcessor().upload_and_get_url(local_file_path=sam2_img_path)

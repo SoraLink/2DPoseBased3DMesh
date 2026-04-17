@@ -109,17 +109,23 @@ def segment_subject(image_path, output_path, keypoints, pad_ratio=0.3):
         raise ValueError("图像编码保存失败")
 
 
-def segment_subject2(image_path, output_dir, keypoints, predictor, pad_ratio=0.3):
+def segment_subject2(image_path, output_dir, keypoints, types, predictor, pad_ratio=0.3):
     """
     SAM 2 图像分割与扩图函数 (带关键点可视化)
     """
     # 1. 提取有效关键点
     points_coords = []
+    input_labels = []
     # 假设 read_kpts_annotation 返回的是 [N, 3] 的数组
-    for pt in keypoints:
+    for i, pt in enumerate(keypoints):
         x, y, v = pt[0], pt[1], pt[2]
-        if v > 0:
+        if v > 0 and types[i] != 2:
             points_coords.append([x, y])
+            if types[i] == 0:
+                input_labels.append(1)
+            elif types[i] == 1:
+                input_labels.append(0)
+
 
     if not points_coords:
         print(f"⚠️ 跳过 {image_path}: 未找到有效可见点")
@@ -231,9 +237,9 @@ def main():
     for img_path in image_files:
         # 🌟 修复 3：创建独立的子文件夹 (e.g., ./test_sam2/image_001/)
         try:
-            kpts_orig, types_orig = read_kpts_annotation(str(img_path), annotation_file)
+            kpts_orig, kpts, types_orig = read_kpts_annotation(str(img_path), annotation_file)
             # 传入 predictor 和独立的输出目录
-            segment_subject2(str(img_path), str(output_dir), kpts_orig, predictor)
+            segment_subject2(str(img_path), str(output_dir), kpts, types_orig, predictor)
         except Exception as e:
             print(f"❌ 处理 {img_path.name} 时发生错误: {e}")
 
