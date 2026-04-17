@@ -370,7 +370,7 @@ class GeometricRefinerAgent:
 
         [Strict Rules]
         1. Look at the SECOND image (the skeleton graph). This is your exact target pose.
-        2. Adjust the angles and positions of the generated limbs in the FIRST image to perfectly align with the green skeleton lines.
+        2. Adjust the angles and positions of the generated limbs in the FIRST image to perfectly align with the skeleton lines.
         3. Maintain photorealistic skin texture and clothing continuity.
         """
 
@@ -445,6 +445,7 @@ class GeometricRefinerAgent:
             if response.status_code == 200:
                 for content in response.output.choices[0].message.content:
                     if 'image' in content:
+                        print("成功生成图像{}".format(content['image']))
                         return content['image']
                 raise RuntimeError("❌ API 返回了 200，但未找到图片链接。")
             else:
