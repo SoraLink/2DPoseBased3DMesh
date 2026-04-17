@@ -1,4 +1,5 @@
 import os
+from pathlib import Path
 
 import dashscope
 import numpy as np
@@ -22,8 +23,8 @@ def parse_args():
     parser = argparse.ArgumentParser(description="🚀 Neuro-Symbolic Agentic 3D Pipeline")
 
     # 基础输入参数
-    parser.add_argument('--img', type=str,
-                        help='Path to the input image')
+    parser.add_argument('--img_dir', type=str,
+                        help='Dir of the input images')
 
     # PoseExtractor 参数 (必填或提供默认路径)
     parser.add_argument('--pose_config', type=str,
@@ -38,46 +39,37 @@ def parse_args():
     parser.add_argument('--annotation_file', type=str,
                         default='./data/train_final.json',
                         help='Path to the annotation file (optional)')
-    parser.add_argument('--image_save_dir', type=str)
-    parser.add_argument('--mesh_save_dir', type=str)
+    parser.add_argument('--output_dir', type=str)
 
     return parser.parse_args()
 
 
-def main(args):
+def predict(args, img_path, output_path, pose_extractor, reconstructor, geometric_refiner, image_editor):
+    image_name = os.path.basename(img_path)
     print("====== 🚀 Neuro-Symbolic Agentic 3D Pipeline ======")
 
-    if not os.path.exists(args.img):
-        print(f"❌ 找不到输入图片: {args.img}")
+    if not os.path.exists(img_path):
+        print(f"❌ 找不到输入图片: {img_path}")
         return
 
     # 1. 初始化所有类 (传入 argparse 解析好的参数)
-    print("\n[Init] 加载核心模块...")
-    pose_extractor = PoseExtractor(config_file=args.pose_config,
-                                   checkpoint_file=args.pose_ckpt,
-                                   device=args.device)
 
-    reconstructor = ReconstructionEngine()
-    image_editor = AgenticImageEditor()
-    geometric_refiner = GeometricRefinerAgent(pose_extractor)
-
-    print(f"\n[Processing] 开始处理图像: {args.img}")
-    kpts_orig, types_orig = read_kpts_annotation(args.img, args.annotation_file)
-    sam2_img_path, mask = segment_subject(args.img, kpts_orig)
+    print(f"\n[Processing] 开始处理图像: {img_path}")
+    kpts_orig, types_orig = read_kpts_annotation(img_path, args.annotation_file)
+    sam2_img_path, mask = segment_subject(img_path, kpts_orig)
 
     image_url = OSSProcessor().upload_and_get_url(local_file_path=sam2_img_path)
 
     # ==========================================
     # 4. Agentic Loop (生成 -> Critic -> 再生成)
     # ==========================================
-    save_dir = args.image_save_dir
-    if not isinstance(save_dir, str):
-        save_dir = f"./workdir/output_{int(time.time())}"
+    if not isinstance(output_path, str):
+        output_path = f"./workdir/output_{int(time.time())}"
     generated_image_urls = image_editor.run(image_url)
     last_generated_image_url = generated_image_urls[-1]
-    save_image_from_url(generated_image_urls, "image_editor", save_dir)
+    save_image_from_url(generated_image_urls, "image_editor", output_path)
     generated_image_urls = geometric_refiner.run(kpts_orig, last_generated_image_url)
-    all_path = save_image_from_url(generated_image_urls, "geometric_refiner", save_dir)
+    all_path = save_image_from_url(generated_image_urls, "geometric_refiner", output_path)
     final_image_url = generated_image_urls[-1]
 
     # ==========================================
@@ -102,9 +94,9 @@ def main(args):
         img_pil = Image.fromarray(img_rgb)
 
         # 4. 执行 3D 恢复
-        # 注意: 这里的 args.img 可能依然是你最开始的本地路径，用于提取基础文件名
-        base_name = os.path.basename(args.img).split('.')[0]
-        mesh_save_path = os.path.join(args.mesh_save_dir, f"{base_name}_mesh.obj")
+        # 注意: 这里的 img_path 可能依然是你最开始的本地路径，用于提取基础文件名
+        base_name = os.path.basename(img_path).split('.')[0]
+        mesh_save_path = os.path.join(output_path, f"{base_name}_mesh.obj")
 
         mesh_save_path, pred_joints_3d, pred_cam = reconstructor.predict_mesh(img_pil, mesh_save_path)
         print(f"✅ 3D Mesh 已保存至: {mesh_save_path}")
@@ -259,7 +251,7 @@ def main(args):
         else:
             raise ValueError("No residual bone cutting tasks found.")
 
-        out_img_path, pred_mask = project_mesh_overlay(args.img, mesh, M_inv, pred_cam)  # 将最终 Mesh 投影回原图坐标系，生成 Overlay
+        out_img_path, pred_mask = project_mesh_overlay(img_path, mesh, M_inv, pred_cam)  # 将最终 Mesh 投影回原图坐标系，生成 Overlay
         miou_score = calculate_miou(pred_mask, mask)
         print(f"📊 [量化评估] 掩码 mIoU 评分: {miou_score:.4f}")
 
@@ -553,6 +545,34 @@ def save_image_from_url(urls, source, save_dir):
         except requests.exceptions.RequestException as e:
             print(f"❌ 下载失败: {e}")
     return all_path
+
+def main(args):
+    pose_extractor = PoseExtractor(config_file=args.pose_config,
+                                   checkpoint_file=args.pose_ckpt,
+                                   device=args.device)
+    reconstructor = ReconstructionEngine()
+    geometric_refiner = GeometricRefinerAgent(pose_extractor)
+    image_editor = AgenticImageEditor()
+
+    image_dir = Path(args.img_dir)
+    valid_extensions = ('.jpg', '.jpeg', '.png')
+    image_files = [
+        f for f in image_dir.rglob('*') if f.suffix.lower() in valid_extensions
+    ]
+
+    for img_path in image_files:
+        current_output_dir = Path(args.output_dir) / img_path.stem
+        current_output_dir.mkdir(parents=True, exist_ok=True)
+        try:
+            print(f"\n[Main] 📥 正在处理第 {image_files.index(img_path) + 1}/{len(image_files)} 张: {img_path.name}")
+            predict(args, str(img_path), str(current_output_dir),
+                    pose_extractor, reconstructor, geometric_refiner, image_editor)
+        except Exception as e:
+            # 记录错误但不中断循环
+            print(f"❌ 处理图片 {img_path.name} 时发生错误: {str(e)}")
+            with open(Path(args.output_dir) / "error_log.txt", "a") as f:
+                f.write(f"{img_path.name}: {str(e)}\n")
+            continue
 
 if __name__ == "__main__":
     args = parse_args()
