@@ -241,7 +241,7 @@ def main():
             # 传入 predictor 和独立的输出目录
             segment_subject2(str(img_path), str(output_dir), kpts, types_orig, predictor)
         except Exception as e:
-            print(f"❌ 处理 {img_path.name} 时发生错误: {e}")
+            raise e
 
 
 if __name__ == "__main__":
