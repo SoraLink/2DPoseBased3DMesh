@@ -14,7 +14,7 @@ from image_ops import OSSProcessor
 from agentic_critic import AgenticImageEditor, GeometricRefinerAgent
 from reconstruction_3d import ReconstructionEngine
 from residual_mesh_cutter import ResidualMeshCutter
-from sam2_coco import segment_subject
+from sam2_coco import SAM2Predictor
 
 dashscope.base_http_api_url = 'https://dashscope-intl.aliyuncs.com/api/v1'
 dashscope.api_key = os.getenv("DASHSCOPE_API_KEY")
@@ -44,7 +44,7 @@ def parse_args():
     return parser.parse_args()
 
 
-def predict(args, img_path, output_path, pose_extractor, reconstructor, geometric_refiner, image_editor):
+def predict(args, img_path, output_path, pose_extractor, reconstructor, geometric_refiner, image_editor, sam2_predictor):
     print("====== 🚀 Neuro-Symbolic Agentic 3D Pipeline ======")
 
     if not os.path.exists(img_path):
@@ -55,7 +55,7 @@ def predict(args, img_path, output_path, pose_extractor, reconstructor, geometri
 
     print(f"\n[Processing] 开始处理图像: {img_path}")
     kpts_orig, kpts, types_orig = read_kpts_annotation(img_path, args.annotation_file)
-    sam2_img_path, mask = segment_subject(img_path, output_path, kpts_orig)
+    sam2_img_path, mask = sam2_predictor.segment_subject(img_path, output_path, kpts_orig)
 
     image_url = OSSProcessor().upload_and_get_url(local_file_path=sam2_img_path)
 
@@ -251,6 +251,8 @@ def predict(args, img_path, output_path, pose_extractor, reconstructor, geometri
             raise ValueError("No residual bone cutting tasks found.")
 
         out_img_path, pred_mask = project_mesh_overlay(img_path, mesh, M_inv, pred_cam)  # 将最终 Mesh 投影回原图坐标系，生成 Overlay
+        sam2_img_path, mask = sam2_predictor.segment_subject2(img_path, output_path, kpts_orig)
+
         miou_score = calculate_miou(pred_mask, mask)
         print(f"📊 [量化评估] 掩码 mIoU 评分: {miou_score:.4f}")
 
@@ -558,6 +560,7 @@ def main(args):
     reconstructor = ReconstructionEngine()
     geometric_refiner = GeometricRefinerAgent(pose_extractor)
     image_editor = AgenticImageEditor()
+    sam_predictor = SAM2Predictor()
 
     image_dir = Path(args.img_dir)
     valid_extensions = ('.jpg', '.jpeg', '.png')
@@ -574,7 +577,7 @@ def main(args):
                 f"\n[Main] 📥 正在处理第 {success_count + 1} 张成功样本 (总进度: {image_files.index(img_path) + 1}/{len(image_files)}): {img_path.name}")
 
             miou, intact, residual = predict(args, str(img_path), str(current_output_dir),
-                                             pose_extractor, reconstructor, geometric_refiner, image_editor)
+                                             pose_extractor, reconstructor, geometric_refiner, image_editor, sam_predictor)
 
             # 累加分数
             miou_total += miou
