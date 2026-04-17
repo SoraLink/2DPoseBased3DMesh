@@ -252,7 +252,7 @@ def predict(args, img_path, output_path, pose_extractor, reconstructor, geometri
             raise ValueError("No residual bone cutting tasks found.")
 
         out_img_path, pred_mask = project_mesh_overlay(img_path, mesh, M_inv, pred_cam)  # 将最终 Mesh 投影回原图坐标系，生成 Overlay
-        sam2_img_path, mask = sam2_predictor.segment_subject2(img_path, output_path, kpts_orig)
+        sam2_img_path, mask = sam2_predictor.segment_subject2(img_path, output_path, kpts, types_orig)
 
         miou_score = calculate_miou(pred_mask, mask)
         print(f"📊 [量化评估] 掩码 mIoU 评分: {miou_score:.4f}")
