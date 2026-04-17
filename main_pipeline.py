@@ -24,6 +24,7 @@ def parse_args():
 
     # 基础输入参数
     parser.add_argument('--img_dir', type=str,
+                        default='./data/eval',
                         help='Dir of the input images')
 
     # PoseExtractor 参数 (必填或提供默认路径)
@@ -39,7 +40,7 @@ def parse_args():
     parser.add_argument('--annotation_file', type=str,
                         default='./data/train_final.json',
                         help='Path to the annotation file (optional)')
-    parser.add_argument('--output_dir', type=str)
+    parser.add_argument('--output_dir', default='./workdir', type=str)
 
     return parser.parse_args()
 
