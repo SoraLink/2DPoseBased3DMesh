@@ -132,7 +132,7 @@ def segment_subject2(image_path, output_dir, keypoints, types, predictor, pad_ra
         return None, None
 
     input_points = np.array(points_coords)
-    input_labels = np.ones(len(input_points))
+    input_labels = np.array(input_labels)
 
     # 2. 读取图片 (支持中文路径)
     image_data = np.fromfile(image_path, dtype=np.uint8)
