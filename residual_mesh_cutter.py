@@ -3,7 +3,7 @@ import cv2
 import numpy as np
 import trimesh
 import networkx as nx
-
+import pymeshlab
 
 class ResidualMeshCutter:
     def __init__(self, focal_length=5000.0, img_center=(128.0, 128.0)):
