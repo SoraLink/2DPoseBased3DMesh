@@ -68,24 +68,23 @@ class ReconstructionEngine:
         self.device = torch.device(device)
         print(">>> 🚀 终于搞定了！模型已进入显存。")
 
-
     @torch.no_grad()
     def predict(self, image_path):
-        # 1. 读图
         original_img = load_img(image_path)
         height, width = original_img.shape[:2]
 
-        # 2. YOLO 检测
+        # YOLO 检测
         yolo_results = self.detector.predict(original_img, device='cuda', classes=0, verbose=False)
         yolo_bbox = yolo_results[0].boxes.xyxy.detach().cpu().numpy()
 
         if len(yolo_bbox) < 1:
             return None
 
-        # 3. 仿照作者逻辑处理 bbox (取第一个人)
+        # 构建 xywh
         det = yolo_bbox[0]
         yolo_bbox_xywh = np.array([det[0], det[1], det[2] - det[0], det[3] - det[1]])
 
+        # 调用 process_bbox (这会返回 [top_left_x, top_left_y, width, height])
         bbox = process_bbox(
             bbox=yolo_bbox_xywh,
             img_width=width,
@@ -93,7 +92,6 @@ class ReconstructionEngine:
             input_img_shape=self.cfg.model.input_img_shape
         )
 
-        # 4. 生成 Patch (抠图)
         img_patch, _, _ = generate_patch_image(
             cvimg=original_img,
             bbox=bbox,
@@ -103,123 +101,158 @@ class ReconstructionEngine:
             out_shape=self.cfg.model.input_img_shape
         )
 
-        # 5. 准备输入 Tensor
         img_tensor = self.transform(img_patch.astype(np.float32)) / 255
         img_tensor = img_tensor.cuda()[None, :, :, :]
-
         inputs = {'img': img_tensor}
 
-        # 6. 核心推理
-        # 'test' 是作者代码要求的 mode
         out = self.demoer.model(inputs, {}, {}, 'test')
 
-        # 7. 提取数据
+        joints_3d = out['smplx_joint_cam'].detach().cpu().numpy()[0]
+        mesh = out['smplx_mesh_cam'].detach().cpu().numpy()[0]
+
+        # vertices = out['smplx_mesh_cam'].detach().cpu().numpy()[0]
+        # regressor = self.smpl_x.J_regressor
+        # synced_joints = np.matmul(regressor, vertices)
+        # aligned_144 = self.align_joints(joints_3d, synced_joints)
+        # ==========================================
+        # 👑 官方解法：按 BBox 比例直接缩放相机内参
+        # ==========================================
+        # 为了防报错，做个属性兼容
+        input_shape = getattr(self.cfg.model, 'input_body_shape', self.cfg.model.input_img_shape)
+
+        global_focal = [
+            self.cfg.model.focal[0] / input_shape[1] * bbox[2],
+            self.cfg.model.focal[1] / input_shape[0] * bbox[3]
+        ]
+        global_princpt = [
+            self.cfg.model.princpt[0] / input_shape[1] * bbox[2] + bbox[0],
+            self.cfg.model.princpt[1] / input_shape[0] * bbox[3] + bbox[1]
+        ]
+
         return {
-            'joints_3d': out['smplx_joint_cam'].detach().cpu().numpy()[0],  # 3D 关键点
-            'mesh': out['smplx_mesh_cam'].detach().cpu().numpy()[0],  # 3D 网格
-            'bbox': bbox  # 抠图用的框，可能后续评估需要
+            'joints_3d': joints_3d,
+            'mesh': mesh,
+            'bbox': bbox,
+            'global_cam': {
+                'focal': np.array(global_focal),
+                'princpt': np.array(global_princpt)
+            }
         }
 
+    def align_joints(self, original_joints, synced_joints):
+        """
+        使用 Procrustes 分析将 original_joints (144点) 对齐到 synced_joints (55点)
+        """
+        common_idx = np.arange(22)
+        A = original_joints[common_idx]
+        B = synced_joints[common_idx]
+
+        # 1. 计算质心
+        centroid_A = np.mean(A, axis=0)
+        centroid_B = np.mean(B, axis=0)
+
+        # 2. 去中心化
+        AA = A - centroid_A
+        BB = B - centroid_B
+
+        # 3. 计算缩放因子 s (不计算旋转矩阵 R)
+        # 用去中心化后的向量模长比值代表缩放
+        s = np.mean(np.linalg.norm(BB, axis=1)) / np.mean(np.linalg.norm(AA, axis=1))
+
+        # 4. 计算平移向量 t
+        # 因为没有旋转，直接用目标质心减去缩放后的源质心
+        t = centroid_B - s * centroid_A
+
+        # 5. 应用变换到 144 个点
+        aligned_joints_144 = s * original_joints + t
+
+        return aligned_joints_144
 
     def predict_mesh(self, image_path, save_path: str):
-        """
-        完全兼容 4D-Humans 风格的推理函数
-        返回: save_path (OBJ路径), pred_joints_dict (14个核心关节), pred_cam (相机参数)
-        """
-        # 1. 执行推理 (调用我们之前写好的推理逻辑)
-        # 注意：这里我们直接拿到内存中的结果，不需要反复读写硬盘
         res = self.predict(image_path)
         if res is None:
             return None, None, None
 
-        # 2. 提取顶点和面片
-        vertices = res['mesh']  # (10475, 3) 对于 SMPL-X
-        faces = self.smpl_x.face  # SMPL-X 的拓扑结构面片索引
-
-        # 3. 导出 OBJ 文件 (使用 trimesh，保持与您原代码一致)
+        vertices = res['mesh']
+        faces = self.smpl_x.face
+        import trimesh
         mesh = trimesh.Trimesh(vertices, faces)
         mesh.export(save_path)
         print(f"[SMPLest-X] ✨ 成功! Mesh 已保存至: {save_path}")
 
-        # 4. 提取关节坐标 (从 137 个关节中提取前 24 个，它们与 SMPL 定义一致)
-        joints_3d = res['joints_3d']
+        regressor = self.smpl_x.J_regressor
+        synced_joints = np.matmul(regressor, vertices)
+        raw_144 = res['joints_3d']
 
-        # ========================================================
-        # 🌟 COCO 17 关键点 + SMPL 原有核心点 完美映射
-        # ========================================================
+        # 针对五官，我们只做一个极简的平移 (让 raw_144 的骨盆对齐到 synced_joints 的骨盆)
+        # 绝对不用 SVD 旋转！
+        root_raw = raw_144[0]
+        root_synced = synced_joints[0]
+
+        # 2. 去中心化（把两套骨架都拉回原点）
+        raw_centered = raw_144 - root_raw
+        synced_centered = synced_joints - root_synced
+        scale = np.mean(np.linalg.norm(synced_centered[1:22], axis=1)) / \
+                (np.mean(np.linalg.norm(raw_centered[1:22], axis=1)) + 1e-8)
+        safe_144 = raw_centered * scale + root_synced
         pred_joints_dict = {
-            # ----- 1. 头部 (COCO 0-4) -----
-            # 鼻尖：SMPL-X 附带的 68 面部特征点中的第 30 个 (55 + 30 = 85)
-            'nose': joints_3d[85],
-            'left_eye': joints_3d[23],  # SMPL-X 标准左眼关节
-            'right_eye': joints_3d[24],  # SMPL-X 标准右眼关节
-            # 耳朵：标准 137 点中无显式耳朵，使用面部外轮廓(0 和 16)的极点作为高精度近似
-            'left_ear': joints_3d[71],  # 左耳底/下颌角起点 (55 + 16 = 71)
-            'right_ear': joints_3d[55],  # 右耳底/下颌角起点 (55 + 0 = 55)
+            # === Part A: 躯干和四肢 (必须用 synced_joints，保证截肢 100% 准确) ===
+            'pelvis': synced_joints[0],
+            'left_hip': synced_joints[1],
+            'right_hip': synced_joints[2],
+            'left_knee': synced_joints[4],
+            'right_knee': synced_joints[5],
+            'left_ankle': synced_joints[7],
+            'right_ankle': synced_joints[8],
+            'neck': synced_joints[12],
+            'left_shoulder': synced_joints[16],
+            'right_shoulder': synced_joints[17],
+            'left_elbow': synced_joints[18],
+            'right_elbow': synced_joints[19],
+            'left_wrist': synced_joints[20],
+            'right_wrist': synced_joints[21],
 
-            # ----- 2. 躯干与上肢 (COCO 5-10) -----
-            'left_shoulder': joints_3d[16],
-            'right_shoulder': joints_3d[17],
-            'left_elbow': joints_3d[18],
-            'right_elbow': joints_3d[19],
-            'left_wrist': joints_3d[20],
-            'right_wrist': joints_3d[21],
-
-            # ----- 3. 下肢 (COCO 11-16) -----
-            'left_hip': joints_3d[1],
-            'right_hip': joints_3d[2],
-            'left_knee': joints_3d[4],
-            'right_knee': joints_3d[5],
-            'left_ankle': joints_3d[7],
-            'right_ankle': joints_3d[8],
-
-            # ----- 4. 兼容附加核心点 -----
-            'pelvis': joints_3d[0],  # 全局根节点
-            'neck': joints_3d[12],  # 颈部
+            # === Part B: 五官点 (用平移修正后的 safe_144) ===
+            'nose': vertices[9120],
+            'left_eye': vertices[9448],
+            'right_eye': vertices[9929],
+            'left_ear': vertices[6],
+            'right_ear': vertices[616],
         }
 
-        # 6. 处理相机参数
-        # 4D-Humans 返回的是 [s, tx, ty] (弱透视相机)
-        # SMPLest-X 默认返回的是完整的相机内参，为了保持返回格式，我们返回一个包含内参的数组
-        # 如果您的下游逻辑需要位移/缩放，可以直接使用 bbox 信息计算
-        pred_cam = {
-            'focal': self.cfg.model.focal,
-            'princpt': self.cfg.model.princpt,
-            'bbox': res['bbox']
-        }
-
-        return save_path, pred_joints_dict, pred_cam
+        # 🌟 直接返回绝对精准的全局相机参数
+        return save_path, pred_joints_dict, res['global_cam']
 
 
-if __name__ == "__main__":
-    # 测试一下
-    api = SMPLestXPredictor(ckpt_name='smplest_x_h')
-    res = api.predict('/home/sora/workspace/SMPLest-X/baidu_841.jpg')
-    if res:
-        raw_joints = res['joints_3d']
-        mesh_vertices = res['mesh']  # 这就是 3D 表面的顶点坐标 (N, 3)
-
-        print(f"成功提取 3D 节点，维度: {raw_joints.shape}")
-        print(f"成功提取 3D 网格顶点，维度: {mesh_vertices.shape}")
-
-        # ==========================================
-        # 导出 OBJ 文件的魔法代码
-        # ==========================================
-        # 1. 拿到模型的 Faces (面片连接关系)
-        faces = api.smpl_x.face
-
-        # 2. 指定输出路径
-        obj_path = "/home/sora/workspace/SMPLest-X/output_mesh.obj"
-
-        # 3. 写入 OBJ 格式
-        with open(obj_path, 'w') as f:
-            # 写入所有的顶点 (v x y z)
-            for v in mesh_vertices:
-                f.write(f"v {v[0]:.6f} {v[1]:.6f} {v[2]:.6f}\n")
-
-            # 写入所有的面 (f v1 v2 v3)，注意 OBJ 的索引是从 1 开始的
-            for face in faces:
-                f.write(f"f {face[0] + 1} {face[1] + 1} {face[2] + 1}\n")
-
-        print(f"🎉 OBJ 文件已成功导出至: {obj_path}")
-        print("赶紧把它拖进 Blender 或者 3D Viewer 里看看吧！")
+# if __name__ == "__main__":
+#     # 测试一下
+#     api = SMPLestXPredictor(ckpt_name='smplest_x_h')
+#     res = api.predict('/home/sora/workspace/SMPLest-X/baidu_841.jpg')
+#     if res:
+#         raw_joints = res['joints_3d']
+#         mesh_vertices = res['mesh']  # 这就是 3D 表面的顶点坐标 (N, 3)
+#
+#         print(f"成功提取 3D 节点，维度: {raw_joints.shape}")
+#         print(f"成功提取 3D 网格顶点，维度: {mesh_vertices.shape}")
+#
+#         # ==========================================
+#         # 导出 OBJ 文件的魔法代码
+#         # ==========================================
+#         # 1. 拿到模型的 Faces (面片连接关系)
+#         faces = api.smpl_x.face
+#
+#         # 2. 指定输出路径
+#         obj_path = "/home/sora/workspace/SMPLest-X/output_mesh.obj"
+#
+#         # 3. 写入 OBJ 格式
+#         with open(obj_path, 'w') as f:
+#             # 写入所有的顶点 (v x y z)
+#             for v in mesh_vertices:
+#                 f.write(f"v {v[0]:.6f} {v[1]:.6f} {v[2]:.6f}\n")
+#
+#             # 写入所有的面 (f v1 v2 v3)，注意 OBJ 的索引是从 1 开始的
+#             for face in faces:
+#                 f.write(f"f {face[0] + 1} {face[1] + 1} {face[2] + 1}\n")
+#
+#         print(f"🎉 OBJ 文件已成功导出至: {obj_path}")
+#         print("赶紧把它拖进 Blender 或者 3D Viewer 里看看吧！")

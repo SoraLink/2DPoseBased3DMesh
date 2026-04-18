@@ -28,6 +28,42 @@ class ResidualMeshCutter:
         ray_dir = np.array([ray_x, ray_y, ray_z])
         return ray_dir / np.linalg.norm(ray_dir)
 
+    def _calculate_exact_cut_proportion_2d_driven(self, pt_2d, bone_start_3d, bone_end_3d):
+        """
+        🚀 博士级修复：利用 2D 投影比例来锁定 3D 切割点
+        """
+
+        # 1. 将 3D 骨头两端投影到 2D 屏幕上
+        def project(p3d):
+            x = self.fx * (p3d[0] / p3d[2]) + self.cx
+            y = self.fy * (p3d[1] / p3d[2]) + self.cy
+            return np.array([x, y])
+
+        p_start = project(bone_start_3d)
+        p_end = project(bone_end_3d)
+
+        # 👇 加入这三行灵魂拷问
+        print(f"      🔍 [2D 坐标对齐核查]")
+        print(f"         - 你的标注点 (pt_2d)  : [{pt_2d[0]:.1f}, {pt_2d[1]:.1f}]")
+        print(f"         - 髋部投影点 (p_start): [{p_start[0]:.1f}, {p_start[1]:.1f}]")
+        print(f"         - 膝盖投影点 (p_end)  : [{p_end[0]:.1f}, {p_end[1]:.1f}]")
+
+
+        # 2. 计算 2D 向量
+        bone_vec_2d = p_end - p_start
+        target_vec_2d = pt_2d - p_start
+
+        # 3. 计算残肢点在 2D 骨骼线段上的比例 (点乘投影)
+        denom = np.dot(bone_vec_2d, bone_vec_2d)
+        if denom < 1e-6:
+            return 0.5
+
+        lambda_2d = np.dot(target_vec_2d, bone_vec_2d) / denom
+
+        # 4. 这里的 lambda 就是你要的“正数”了！
+        # 即使 Lambda 稍微出界，我们也给它一个合理的范围
+        return np.clip(lambda_2d, 0.05, 0.95)
+
     def _calculate_exact_cut_proportion(self, ray_dir, bone_start, bone_end):
         """计算 2D 射线与 3D 骨骼线段之间的最近点比例 (Lambda)"""
         # ... (此段数学逻辑完全不变，保持原样) ...
@@ -42,12 +78,31 @@ class ResidualMeshCutter:
         d = np.dot(v1, w0)
         e = np.dot(v2, w0)
 
-        denominator = a * c - b * b
-        if denominator < 1e-6:
+        denom = a * c - b * b
+        if denom < 1e-6:
             return 0.5
 
-        t_c = (a * e - b * d) / denominator
-        return np.clip(t_c, 0.0, 1.0)
+        t_r = (b * e - c * d) / denom
+        t_c = (a * e - b * d) / denom
+
+        # 🌟 关键 Debug 变量：计算 3D 空间中的最短距离
+        # 射线上的最近点
+        p_ray = self.cam_origin + t_r * ray_dir
+        # 骨骼上的最近点 (限制在 0-1 之间)
+        lambda_clamped = np.clip(t_c, 0.0, 1.0)
+        p_bone = bone_start + lambda_clamped * bone_vec
+
+        # 3D 空间中的物理距离 (米)
+        miss_distance = np.linalg.norm(p_ray - p_bone)
+
+        # 将这个值存入 self 以便后续打印
+        self.last_debug_info = {
+            'miss_dist': miss_distance,
+            'lambda_raw': t_c,
+            'ray_depth': t_r
+        }
+
+        return lambda_clamped
 
     def _apply_calibration(self, pt_2d, M_inv):
         if M_inv is None:
@@ -56,6 +111,8 @@ class ResidualMeshCutter:
         # P_gen = M_orig_to_gen @ P_orig
         new_pt = M_inv @ point
         return new_pt[:2]
+
+
 
     def process_multiple_cuts(self, mesh_path, cut_tasks, M_inv=None):
         """
@@ -72,10 +129,16 @@ class ResidualMeshCutter:
         for task in cut_tasks:
             print(f"   -> 处理部位: {task['name']}")
 
-            pt_calibrated = self._apply_calibration(task['pt_2d'], M_inv)
-            ray_dir = self._get_ray_direction(pt_calibrated)
-            lambda_cut = self._calculate_exact_cut_proportion(ray_dir, task['start_3d'], task['end_3d'])
+            # pt_calibrated = self._apply_calibration(task['pt_2d'], M_inv)
+            # ray_dir = self._get_ray_direction(pt_calibrated)
+            lambda_cut = self._calculate_exact_cut_proportion_2d_driven(task['pt_2d'], task['start_3d'], task['end_3d'])
+            # lambda_cut = self._calculate_exact_cut_proportion(ray_dir, task['start_3d'], task['end_3d'])
+            # debug = self.last_debug_info
 
+            # print(f"📊 [几何鉴定] 部位: {task['name']}")
+            # print(f"   -> 射线与骨骼 3D 最短距离: {debug['miss_dist']:.4f} 米")
+            # print(f"   -> 射线深度 (Ray Depth): {debug['ray_depth']:.2f} 米")
+            # print(f"   -> 原始 Lambda (未 Clip): {debug['lambda_raw']:.4f}")
             cut_origin = task['start_3d'] + lambda_cut * (task['end_3d'] - task['start_3d'])
             cut_normal = task['start_3d'] - task['end_3d']
             cut_normal = cut_normal / np.linalg.norm(cut_normal)

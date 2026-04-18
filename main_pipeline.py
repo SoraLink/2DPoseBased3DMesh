@@ -222,7 +222,9 @@ def predict(args, img_path, output_path, pose_extractor, reconstructor, geometri
                 res_name = METAINFO['keypoint_info'][i]['name']
 
                 # 获取 2D 坐标 (假设 kpts_orig 的格式是 [x, y, conf])
-                pt_2d = kpts_orig[i][0:2]
+                pt_2d_orig = kpts_orig[i][0:2]
+                pt_2d_orig_homo = np.array([pt_2d_orig[0], pt_2d_orig[1], 1.0])
+                pt_2d_gen = (M_inv @ pt_2d_orig_homo)[:2]  # Warp the point
                 # 查表找到对应的 3D 骨骼起点和终点
                 if res_name in RES_BONE_MAPPING:
                     start_joint_name, end_joint_name = RES_BONE_MAPPING[res_name]
@@ -233,35 +235,53 @@ def predict(args, img_path, output_path, pose_extractor, reconstructor, geometri
                     # 组装切割任务
                     cut_tasks.append({
                         'name': res_name,
-                        'pt_2d': pt_2d,
+                        'pt_2d': pt_2d_gen,
                         'start_3d': start_3d,
                         'end_3d': end_3d
                     })
 
         # 如果收集到了切割任务，才去执行截断
+                    # 如果收集到了切割任务，才去执行截断
         if cut_tasks:
             gen_h, gen_w = img_bgr.shape[:2]
-            model_input_size = 512.0
-            scale_factor = gen_w / model_input_size
 
-            # 将内参拉伸到和 M_inv 目标空间一致
-            global_focal = pred_cam['focal'][0] * scale_factor
-            global_cx = pred_cam['princpt'][0] * scale_factor
-            global_cy = pred_cam['princpt'][1] * scale_factor
-            # 初始化截肢器 (焦距 5000 根据 HMR/CLIFF 默认设置)
+            # 🌟 直接使用原作者推导出的官方全局相机内参
+            global_focal = pred_cam['focal']
+            global_cx = pred_cam['princpt'][0]
+            global_cy = pred_cam['princpt'][1]
+
             mesh_cutter = ResidualMeshCutter(
-                focal_length=global_focal,
+                focal_length=global_focal[0],
                 img_center=(global_cx, global_cy)
             )
             mesh = mesh_cutter.process_multiple_cuts(
                 mesh_path=mesh_save_path,
                 cut_tasks=cut_tasks,
-                M_inv=M_inv,
+                M_inv=None,
             )
         else:
             raise ValueError("No residual bone cutting tasks found.")
+        global_cam = {
+            'focal': global_focal,
+            'princpt': np.array([global_cx, global_cy])
+        }
 
-        out_img_path, pred_mask = project_mesh_overlay(img_path, mesh, M_inv, pred_cam, output_path, scale_factor)  # 将最终 Mesh 投影回原图坐标系，生成 Overlay
+        print(f"\n--- 🧪 坐标系法医鉴定报告 ---")
+        print(f"1. 生成图尺寸 (H, W): {img_bgr.shape[:2]}")
+        print(f"2. 模型原始 Focal: {pred_cam['focal']}")
+        print(f"3. 放大后的 Global Focal: {global_focal}")
+        print(f"4. 你设定的投影中心: ({global_cx}, {global_cy})")
+
+        # 计算生成图里人的实际 2D 中心
+        person_center_gen = np.mean(kpts_gen[kpts_gen[:, 2] > 0.3, :2], axis=0)
+        print(f"5. 生成图里人的实际 2D 中心: {person_center_gen}")
+
+        # 计算偏差
+        offset_y = global_cy - person_center_gen[1]
+        print(f"6. 垂直方向偏差 (Offset Y): {offset_y:.2f} 像素 (正值代表投影偏高)")
+        # ================= DEBUG BLOCK END =================
+
+        out_img_path, pred_mask = project_mesh_overlay(img_path, mesh, M_inv, global_cam, output_path)  # 将最终 Mesh 投影回原图坐标系，生成 Overlay
         sam2_img_path, mask = sam2_predictor.segment_subject2(img_path, output_path, kpts, types_orig)
 
         miou_score = calculate_miou(pred_mask, mask)
@@ -271,16 +291,18 @@ def predict(args, img_path, output_path, pose_extractor, reconstructor, geometri
 
         for task in cut_tasks:
             # 如果你在 cutter 里存了，可以直接这样取：
-            if 'cut_origin_3d' in task:
-                pred_joints_3d[task['name']] = task['cut_origin_3d']
+            if 'cut_origin' in task:
+                pred_joints_3d[task['name']] = task['cut_origin']
             else:
                 # Fallback: 如果拿不到，暂时用 start 和 end 的中点代替以防止报错
                 pred_joints_3d[task['name']] = (task['start_3d'] + task['end_3d']) / 2.0
 
         RES_MAPPING = {METAINFO['keypoint_info'][i]['name']: i for i in range(23, 31)}
 
-        mpjpe_intact = calculate_2d_mpjpe(pred_joints_3d, kpts_orig, M_inv, pred_cam, INTACT_MAPPING)
-        mpjpe_residual = calculate_2d_mpjpe(pred_joints_3d, kpts_orig, M_inv, pred_cam, RES_MAPPING)
+
+
+        mpjpe_intact = calculate_2d_mpjpe(pred_joints_3d, kpts_orig, M_inv, global_cam, INTACT_MAPPING)
+        mpjpe_residual = calculate_2d_mpjpe(pred_joints_3d, kpts_orig, M_inv, global_cam, RES_MAPPING)
 
         print(f"📊 [量化评估] 完整关节 2D MPJPE: {mpjpe_intact:.2f} pixels")
         print(f"📊 [量化评估] 残肢端点 2D MPJPE: {mpjpe_residual:.2f} pixels")
@@ -290,13 +312,13 @@ def predict(args, img_path, output_path, pose_extractor, reconstructor, geometri
         raise e
 
 
-def project_mesh_overlay(image_path, mesh, M_inv, pred_cam, output_dir, scale_factor):
+def project_mesh_overlay(image_path, mesh, M_inv, global_cam, output_dir):
     # 1. 计算逆矩阵：Gen -> Orig
     M_augmented = np.vstack([M_inv, [0, 0, 1]])
     M_gen_to_orig = np.linalg.inv(M_augmented)[:2, :]
 
-    focal = pred_cam['focal'] * scale_factor
-    princpt = pred_cam['princpt'] * scale_factor
+    focal = global_cam['focal']
+    princpt = global_cam['princpt']
 
     # 2. 读取原图以获取尺寸
     image_data = np.fromfile(image_path, dtype=np.uint8)
@@ -362,13 +384,13 @@ def calculate_miou(pred_mask, gt_mask):
     return float(intersection / union)
 
 
-def calculate_2d_mpjpe(pred_joints_3d, gt_kpts_orig, M_inv, pred_cam, mapping_dict):
+def calculate_2d_mpjpe(pred_joints_3d, gt_kpts_orig, M_inv, global_cam, mapping_dict):
     # Gen -> Orig
     M_augmented = np.vstack([M_inv, [0, 0, 1]])
     M_gen_to_orig = np.linalg.inv(M_augmented)[:2, :]
 
-    focal = pred_cam['focal']
-    princpt = pred_cam['princpt']
+    focal = global_cam['focal']
+    princpt = global_cam['princpt']
 
     errors = []
     for joint_name, gt_idx in mapping_dict.items():
@@ -377,6 +399,7 @@ def calculate_2d_mpjpe(pred_joints_3d, gt_kpts_orig, M_inv, pred_cam, mapping_di
         if conf <= 0: continue
 
         vert = pred_joints_3d[joint_name]
+
         if vert[2] <= 1e-5: continue
 
         # 投影到 Gen
