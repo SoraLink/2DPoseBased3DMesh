@@ -261,7 +261,7 @@ def predict(args, img_path, output_path, pose_extractor, reconstructor, geometri
         else:
             raise ValueError("No residual bone cutting tasks found.")
 
-        out_img_path, pred_mask = project_mesh_overlay(img_path, mesh, M_inv, pred_cam, output_path)  # 将最终 Mesh 投影回原图坐标系，生成 Overlay
+        out_img_path, pred_mask = project_mesh_overlay(img_path, mesh, M_inv, pred_cam, output_path, scale_factor)  # 将最终 Mesh 投影回原图坐标系，生成 Overlay
         sam2_img_path, mask = sam2_predictor.segment_subject2(img_path, output_path, kpts, types_orig)
 
         miou_score = calculate_miou(pred_mask, mask)
@@ -290,13 +290,13 @@ def predict(args, img_path, output_path, pose_extractor, reconstructor, geometri
         raise e
 
 
-def project_mesh_overlay(image_path, mesh, M_inv, pred_cam, output_dir):
+def project_mesh_overlay(image_path, mesh, M_inv, pred_cam, output_dir, scale_factor):
     # 1. 计算逆矩阵：Gen -> Orig
     M_augmented = np.vstack([M_inv, [0, 0, 1]])
     M_gen_to_orig = np.linalg.inv(M_augmented)[:2, :]
 
-    focal = pred_cam['focal']
-    princpt = pred_cam['princpt']
+    focal = pred_cam['focal'] * scale_factor
+    princpt = pred_cam['princpt'] * scale_factor
 
     # 2. 读取原图以获取尺寸
     image_data = np.fromfile(image_path, dtype=np.uint8)
