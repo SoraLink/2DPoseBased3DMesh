@@ -7,7 +7,7 @@ import networkx as nx
 import pymeshlab
 
 class ResidualMeshCutter:
-    def __init__(self, focal_length=5000.0, img_center=(128.0, 128.0)):
+    def __init__(self, focal_length, img_center):
         """
         初始化截肢手术刀
         :param focal_length: HMR 2.0 内部默认焦距 (相对于 256 空间)

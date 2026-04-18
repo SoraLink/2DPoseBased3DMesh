@@ -240,11 +240,18 @@ def predict(args, img_path, output_path, pose_extractor, reconstructor, geometri
 
         # 如果收集到了切割任务，才去执行截断
         if cut_tasks:
-            h, w = img_bgr.shape[:2]
+            gen_h, gen_w = img_bgr.shape[:2]
+            model_input_size = 512.0
+            scale_factor = gen_w / model_input_size
+
+            # 将内参拉伸到和 M_inv 目标空间一致
+            global_focal = pred_cam['focal'][0] * scale_factor
+            global_cx = pred_cam['princpt'][0] * scale_factor
+            global_cy = pred_cam['princpt'][1] * scale_factor
             # 初始化截肢器 (焦距 5000 根据 HMR/CLIFF 默认设置)
             mesh_cutter = ResidualMeshCutter(
-                focal_length=pred_cam['focal'][0],
-                img_center=pred_cam['princpt']
+                focal_length=global_focal,
+                img_center=(global_cx, global_cy)
             )
             mesh = mesh_cutter.process_multiple_cuts(
                 mesh_path=mesh_save_path,
