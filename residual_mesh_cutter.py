@@ -18,22 +18,10 @@ class ResidualMeshCutter:
         self.cx, self.cy = img_center
         self.cam_origin = np.array([0.0, 0.0, 0.0])
 
-    def _apply_calibration(self, pt_2d, M_inv):
-        """
-        将原始图片的 2D 坐标通过仿射矩阵 M_inv 转换到 HMR 的 256 坐标系下
-        M_inv 应该包含: 1. 躯干对齐的位移/缩放  2. 从原图到 256 的缩放
-        """
-        if M_inv is None:
-            return pt_2d
-        # 转换为齐次坐标 [x, y, 1]
-        point = np.array([pt_2d[0], pt_2d[1], 1.0])
-        # 计算变换: P_hmr = M_inv * P_orig
-        new_pt = M_inv @ point
-        return new_pt[:2]
-
     def _get_ray_direction(self, pt_2d):
-        """基于校准后的 2D 点计算 3D 射线方向"""
+        """直接基于原图 2D 点计算 3D 射线方向"""
         u, v = pt_2d
+        # 直接使用传入的原图坐标和绝对光心
         ray_x = (u - self.cx) / self.fx
         ray_y = (v - self.cy) / self.fy
         ray_z = 1.0
@@ -42,6 +30,7 @@ class ResidualMeshCutter:
 
     def _calculate_exact_cut_proportion(self, ray_dir, bone_start, bone_end):
         """计算 2D 射线与 3D 骨骼线段之间的最近点比例 (Lambda)"""
+        # ... (此段数学逻辑完全不变，保持原样) ...
         bone_vec = bone_end - bone_start
         v1 = ray_dir
         v2 = bone_vec
@@ -54,11 +43,19 @@ class ResidualMeshCutter:
         e = np.dot(v2, w0)
 
         denominator = a * c - b * b
-        if denominator < 1e-6:  # 平行情况
+        if denominator < 1e-6:
             return 0.5
 
         t_c = (a * e - b * d) / denominator
         return np.clip(t_c, 0.0, 1.0)
+
+    def _apply_calibration(self, pt_2d, M_inv):
+        if M_inv is None:
+            return pt_2d
+        point = np.array([pt_2d[0], pt_2d[1], 1.0])
+        # P_gen = M_orig_to_gen @ P_orig
+        new_pt = M_inv @ point
+        return new_pt[:2]
 
     def process_multiple_cuts(self, mesh_path, cut_tasks, M_inv=None):
         """

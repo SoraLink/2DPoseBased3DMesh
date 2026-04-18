@@ -241,12 +241,13 @@ def predict(args, img_path, output_path, pose_extractor, reconstructor, geometri
         if cut_tasks:
             h, w = img_bgr.shape[:2]
             # 初始化截肢器 (焦距 5000 根据 HMR/CLIFF 默认设置)
-            mesh_cutter = ResidualMeshCutter(focal_length=5000.0, img_center=(128.0, 128.0))
-
+            mesh_cutter = ResidualMeshCutter(
+                focal_length=pred_cam['focal'][0],
+                img_center=pred_cam['princpt']
+            )
             mesh = mesh_cutter.process_multiple_cuts(
                 mesh_path=mesh_save_path,
-                cut_tasks=cut_tasks,
-                M_inv=M_inv,
+                cut_tasks=cut_tasks
             )
         else:
             raise ValueError("No residual bone cutting tasks found.")
@@ -280,121 +281,59 @@ def predict(args, img_path, output_path, pose_extractor, reconstructor, geometri
         raise e
 
 
-def project_mesh_overlay(image_path, mesh, M_inv, pred_cam, output_dir, focal_length=5000.0, hmr_size=(256, 256)):
-    """
-    将 3D Mesh (HMR space, e.g., SMPL) 精准投影回原始图片坐标系，生成绿色 Overlay。
-    :param image_path: 原始图片路径 (incomplete)
-    :param mesh: 切割完成后的 trimesh 对象
-    :param M_inv: 2x3 矩阵 (原始坐标 -> HMR 256 坐标的校准矩阵)
-    :param focal_length: HMR 内部焦距 (5000.0)
-    :param hmr_size: HMR 内部画布 (256, 256)
-    """
-    # ================================================================
-    # 第一步：计算反向仿射矩阵 (HMR 256 -> 原始坐标系)
-    # ================================================================
-    # 我们需要的是从 [生成图坐标] 映射回 [原始坐标] 的变换 (dst -> src)
-    if M_inv.shape != (2, 3):
-        raise ValueError("M_inv parameters must be a 2x3 matrix.")
+def project_mesh_overlay(image_path, mesh, M_inv, pred_cam, output_dir):
+    # 1. 计算逆矩阵：Gen -> Orig
+    M_augmented = np.vstack([M_inv, [0, 0, 1]])
+    M_gen_to_orig = np.linalg.inv(M_augmented)[:2, :]
 
-    # 🌟 关键：对齐工程细节。将 2x3 扩充为 3x3，然后求逆，再取回 2x3
-    M_inv_augmented = np.vstack([M_inv, [0, 0, 1]])  # 变为 3x3 齐次矩阵
-    try:
-        M_hmr_to_orig_3x3 = np.linalg.inv(M_inv_augmented)  # 完美求逆
-        M_hmr_to_orig = M_hmr_to_orig_3x3[:2, :]  # 变回 2x3 用于 warpAffine
-    except np.linalg.LinAlgError:
-        raise ValueError("Matrix inversion failed. M_inv calculation is incorrect.")
+    focal = pred_cam['focal']
+    princpt = pred_cam['princpt']
 
-    # ================================================================
-    # 第二步：将 3D Mesh 投影到 HMR 虚拟画布 (3D -> 2D 256x256)
-    # ================================================================
-    fx, fy = focal_length, focal_length
-    cx, cy = hmr_size[0] / 2.0, hmr_size[1] / 2.0
-
-    # 提取相机参数：s 是缩放（对应深度），tx, ty 是平移
-    s, tx, ty = pred_cam[0], pred_cam[1], pred_cam[2]
-
-    # 计算 3D 人体应该在的虚拟深度 Z
-    # 公式：Z = 2 * f / (img_size * scale)
-    dist_z = (2.0 * fx) / (hmr_size[0] * s)
-
-    vertices = mesh.vertices
-    projected_pts = np.zeros((len(vertices), 2), dtype=np.int32)
-
-    for i, vert in enumerate(vertices):
-        # 🌟 关键变换：根据相机参数把顶点挪到正确位置
-        # X' = X + tx, Y' = Y + ty, Z' = Z + dist_z
-        # 注意：tx, ty 在 HMR2 里通常是相对于中心的偏移
-        curr_x = vert[0] + tx
-        curr_y = vert[1] + ty
-        curr_z = vert[2] + dist_z
-
-        # 执行透视投影
-        projected_pts[i, 0] = int(fx * (curr_x / curr_z) + cx)
-        projected_pts[i, 1] = int(fy * (curr_y / curr_z) + cy)
-
-    # 创建 HMR 画布的二值遮罩 (256x256)
-    mask_256 = np.zeros(hmr_size, dtype=np.uint8)
-
-    # 将 Faces 的顶点索引映射到投影后的 2D 坐标
-    faces_int = mesh.faces.astype(np.int32)
-    # 🌟 优化：只绘制那些三个顶点都在相机前方的面，防止虚边
-    valid_faces = faces_int
-
-    # 🌟 修改绘制逻辑：cv2.fillPoly 需要一个 list of arrays
-    # 为了性能，我们直接用投影后的点集
-    for face in valid_faces:
-        # 获取该面的三个 2D 顶点
-        pts = projected_pts[face].reshape((-1, 1, 2))
-        cv2.fillPoly(mask_256, [pts], 255)
-
-    # cv2.imwrite("debug_1_mask_256.jpg", mask_256)
-    print(f"DEBUG: 256掩码已保存，白色像素点数: {np.sum(mask_256 > 0)}")
-    # ================================================================
-    # 第三步：将 Mask 变形对齐原图，并进行 Alpha 混合
-    # ================================================================
-    print("[Visualization] 正在坐标反向补偿并混合 Overlay...")
-
-    # 1. 读取原图
+    # 2. 读取原图以获取尺寸
     image_data = np.fromfile(image_path, dtype=np.uint8)
     original_image = cv2.imdecode(image_data, cv2.IMREAD_COLOR)
     h_orig, w_orig = original_image.shape[:2]
 
-    # 2. 🌟 关键：利用 M_hmr_to_orig 将 256 Mask 变形到原图尺寸和位置
-    # 这一步将大模型生成的肢体误差完美消化。
-    mask_orig = cv2.warpAffine(mask_256, M_hmr_to_orig, (w_orig, h_orig), flags=cv2.INTER_LINEAR)
-    # cv2.imwrite("debug_2_mask_orig.jpg", mask_orig)
-    print(f"DEBUG: 变换后掩码已保存，白色像素点数: {np.sum(mask_orig > 0)}")
-    # 3. 创建彩色 Overlay (绿色)
+    vertices = mesh.vertices
+    projected_pts_orig = np.zeros((len(vertices), 2), dtype=np.int32)
+
+    # 3. 极其优雅的坐标穿梭：3D -> Gen 2D -> Orig 2D
+    for i, vert in enumerate(vertices):
+        curr_x, curr_y, curr_z = vert[0], vert[1], vert[2]
+        if curr_z <= 1e-5: curr_z = 1e-5
+
+        # 第一跳：针孔投影到生成图 (Gen) 空间
+        proj_gen_x = focal[0] * (curr_x / curr_z) + princpt[0]
+        proj_gen_y = focal[1] * (curr_y / curr_z) + princpt[1]
+
+        # 第二跳：通过仿射逆矩阵，映射回原图 (Orig) 空间
+        pt_gen = np.array([proj_gen_x, proj_gen_y, 1.0])
+        pt_orig = M_gen_to_orig @ pt_gen
+
+        projected_pts_orig[i, 0] = int(pt_orig[0])
+        projected_pts_orig[i, 1] = int(pt_orig[1])
+
+    # 4. 直接在原图尺寸上绘制，告别粗糙的 cv2.warpAffine 图像变形！
+    mask_orig = np.zeros((h_orig, w_orig), dtype=np.uint8)
+    valid_faces = mesh.faces.astype(np.int32)
+    for face in valid_faces:
+        pts = projected_pts_orig[face].reshape((-1, 1, 2))
+        cv2.fillPoly(mask_orig, [pts], 255)
+
+    # 混合叠加 (后面这块代码不变)
     overlay_color = np.zeros_like(original_image)
-    overlay_color[:] = [0, 255, 0]  # 纯绿，可以改为你喜欢的任何颜色
-
-    # 4. 混合 Overlay (Alpha 混合)
+    overlay_color[:] = [0, 255, 0]
     output_image = original_image.copy()
-    alpha = 0.5  # 透明度
-
-    # 只有 mask 覆盖的区域进行混合
     mask_bool = (mask_orig > 127)
-    output_image = cv2.addWeighted(overlay_color, alpha, output_image, 1 - alpha, 0, dst=output_image)
-    # 将 mask 之外的区域变回原图
+    output_image = cv2.addWeighted(overlay_color, 0.5, output_image, 0.5, 0, dst=output_image)
     output_image[~mask_bool] = original_image[~mask_bool]
 
-    # ================================================================
-    # 第四步：保存高质量结果
-    # ================================================================
-    image_name = os.path.basename(image_path)
-    image_name = image_name.replace(".jpg", "_projection.jpg").replace(".png", "_projection.jpg")
+    # 保存
+    image_name = os.path.basename(image_path).replace(".jpg", "_projection.jpg")
     output_path = os.path.join(output_dir, image_name)
+    cv2.imencode(".jpg", output_image)[1].tofile(output_path)
 
-    encode_param = [int(cv2.IMWRITE_JPEG_QUALITY), 100]
-    is_success, im_buf_arr = cv2.imencode(".jpg", output_image, encode_param)
-
-    if is_success:
-        im_buf_arr.tofile(output_path)
-        print(f"✅ [Projector] 几何闭环可视化已生成: {output_path}")
-        return output_path, mask_orig
-    else:
-        raise ValueError("图像保存失败")
-
+    return output_path, mask_orig
 
 def calculate_miou(pred_mask, gt_mask):
     """
@@ -414,58 +353,34 @@ def calculate_miou(pred_mask, gt_mask):
     return float(intersection / union)
 
 
-def calculate_2d_mpjpe(pred_joints_3d, gt_kpts_orig, M_inv, pred_cam, mapping_dict, focal_length=5000.0,
-                       hmr_size=(256, 256)):
-    """
-    计算 2D 重投影误差 (MPJPE)
-    :param pred_joints_3d: 包含 3D 关节坐标的字典 (例如 {'left_shoulder': [x,y,z]})
-    :param gt_kpts_orig: 原始图像的 2D 关键点数组 (N, 3)，包含 [x, y, conf]
-    :param mapping_dict: 映射字典，格式为 { 骨骼名称: 对应的 gt_kpts_orig 索引 }
-    """
-    # 1. 计算 HMR 256 -> 原始坐标的逆矩阵
-    M_inv_augmented = np.vstack([M_inv, [0, 0, 1]])
-    M_hmr_to_orig = np.linalg.inv(M_inv_augmented)[:2, :]
+def calculate_2d_mpjpe(pred_joints_3d, gt_kpts_orig, M_inv, pred_cam, mapping_dict):
+    # Gen -> Orig
+    M_augmented = np.vstack([M_inv, [0, 0, 1]])
+    M_gen_to_orig = np.linalg.inv(M_augmented)[:2, :]
 
-    fx, fy = focal_length, focal_length
-    cx, cy = hmr_size[0] / 2.0, hmr_size[1] / 2.0
-    s, tx, ty = pred_cam[0], pred_cam[1], pred_cam[2]
-    dist_z = (2.0 * fx) / (hmr_size[0] * s)
+    focal = pred_cam['focal']
+    princpt = pred_cam['princpt']
 
     errors = []
-
     for joint_name, gt_idx in mapping_dict.items():
-        if joint_name not in pred_joints_3d:
-            continue
-
-        # 获取 GT 坐标和置信度 (格式: [x, y, conf])
+        if joint_name not in pred_joints_3d: continue
         gt_x, gt_y, conf = gt_kpts_orig[gt_idx]
-        if conf <= 0:  # 如果点不可见，跳过
-            continue
+        if conf <= 0: continue
 
         vert = pred_joints_3d[joint_name]
+        if vert[2] <= 1e-5: continue
 
-        # 2. 3D 坐标叠加相机平移推到镜头前
-        curr_x = vert[0] + tx
-        curr_y = vert[1] + ty
-        curr_z = vert[2] + dist_z
+        # 投影到 Gen
+        proj_gen_x = focal[0] * (vert[0] / vert[2]) + princpt[0]
+        proj_gen_y = focal[1] * (vert[1] / vert[2]) + princpt[1]
 
-        if curr_z <= 0: continue
+        # 映射回 Orig
+        pt_orig = M_gen_to_orig @ np.array([proj_gen_x, proj_gen_y, 1.0])
 
-        # 3. 透视投影到 256 画布
-        proj_x = fx * (curr_x / curr_z) + cx
-        proj_y = fy * (curr_y / curr_z) + cy
-
-        # 4. 利用仿射逆矩阵映射回原图坐标系
-        pt_256 = np.array([proj_x, proj_y, 1.0])
-        pt_orig = M_hmr_to_orig @ pt_256
-
-        # 5. 计算两点之间的欧式距离（像素误差）
-        err = np.linalg.norm(pt_orig - np.array([gt_x, gt_y]))
+        err = np.linalg.norm(pt_orig[:2] - np.array([gt_x, gt_y]))
         errors.append(err)
 
-    if len(errors) == 0:
-        return 0.0
-    return float(np.mean(errors))
+    return float(np.mean(errors)) if errors else 0.0
 
 def get_final_calibration_matrix(kpts_orig, kpts_gen, image_path):
     """
@@ -503,25 +418,14 @@ def get_final_calibration_matrix(kpts_orig, kpts_gen, image_path):
 
     # 🌟 修复 3：兜底机制，防止 RANSAC 极低概率的求解失败返回 None
     if M_calib is None:
-        print("⚠️ [警告] RANSAC 强对齐失败，退回常规最小二乘法拟合...")
         M_calib, _ = cv2.estimateAffinePartial2D(src, dst)
         if M_calib is None:
-            raise ValueError("对齐完全失败，源点和目标点差异过大！")
+            raise ValueError("对齐完全失败！")
 
-    # 打印有效对齐点数量，方便你 Debug 观察
-    inlier_count = np.sum(inliers) if inliers is not None else len(src)
-    print(f"📐 [Calibration] 使用了 {len(src)} 个锚点，其中 {inlier_count} 个被认定为可靠点(Inliers)。")
+    print(f"📐 [Calibration] Orig -> Gen 映射矩阵计算完成。")
 
-    # 独立计算 X 和 Y 的缩放因子，消除 Resize 变形
-    scale_x = 256.0 / float(current_img_w)
-    scale_y = 256.0 / float(current_img_h)
-    S = np.array([[scale_x, 0, 0],
-                  [0, scale_y, 0]], dtype=np.float32)
-
-    # 组合矩阵
-    M_hmr_inv = S @ np.vstack([M_calib, [0, 0, 1]])
-
-    return M_hmr_inv
+    # 🌟 关键修改：直接返回 2x3 矩阵，不要再乘 256 的缩放矩阵 S 了！
+    return M_calib
 
 def save_image_from_url(urls, source, save_dir):
     all_path = []
