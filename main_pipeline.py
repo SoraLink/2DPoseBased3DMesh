@@ -24,7 +24,7 @@ def parse_args():
 
     # 基础输入参数
     parser.add_argument('--img_dir', type=str,
-                        default='./eval',
+                        default='./data/eval',
                         help='Dir of the input images')
 
     # PoseExtractor 参数 (必填或提供默认路径)
@@ -504,36 +504,35 @@ def main(args):
     for img_path in image_files:
         current_output_dir = Path(args.output_dir) / img_path.stem
         current_output_dir.mkdir(parents=True, exist_ok=True)
+        while True:
+            try:
+                print(
+                    f"\n[Main] 📥 正在处理第 {success_count + 1} 张成功样本 (总进度: {image_files.index(img_path) + 1}/{len(image_files)}): {img_path.name}")
 
-        try:
-            print(
-                f"\n[Main] 📥 正在处理第 {success_count + 1} 张成功样本 (总进度: {image_files.index(img_path) + 1}/{len(image_files)}): {img_path.name}")
+                miou, intact, residual = predict(args, str(img_path), str(current_output_dir),
+                                                 pose_extractor, reconstructor, geometric_refiner, image_editor, sam_predictor)
 
-            miou, intact, residual = predict(args, str(img_path), str(current_output_dir),
-                                             pose_extractor, reconstructor, geometric_refiner, image_editor, sam_predictor)
+                # 累加分数
+                miou_total += miou
+                mpjpe_intact_total += intact
+                mpjpe_residual_total += residual
+                success_count += 1  # 🌟 只有 predict 成功运行后才加 1
 
-            # 累加分数
-            miou_total += miou
-            mpjpe_intact_total += intact
-            mpjpe_residual_total += residual
-            success_count += 1  # 🌟 只有 predict 成功运行后才加 1
+                # 计算平均值 (使用 success_count 避免除以零)
+                avg_miou = miou_total / success_count
+                avg_intact = mpjpe_intact_total / success_count
+                avg_residual = mpjpe_residual_total / success_count
 
-            # 计算平均值 (使用 success_count 避免除以零)
-            avg_miou = miou_total / success_count
-            avg_intact = mpjpe_intact_total / success_count
-            avg_residual = mpjpe_residual_total / success_count
+                print(f"✅ {img_path.name} 处理完成")
+                print(f"📊 当前平均 mIoU: {avg_miou:.4f}")
+                print(f"📊 当前平均 MPJPE (Intact): {avg_intact:.2f} px")
+                print(f"📊 当前平均 MPJPE (Residual): {avg_residual:.2f} px")
+                break
 
-            print(f"✅ {img_path.name} 处理完成")
-            print(f"📊 当前平均 mIoU: {avg_miou:.4f}")
-            print(f"📊 当前平均 MPJPE (Intact): {avg_intact:.2f} px")
-            print(f"📊 当前平均 MPJPE (Residual): {avg_residual:.2f} px")
-            break
-
-        except Exception as e:
-            print(f"❌ 处理图片 {img_path.name} 时发生错误: {str(e)}")
-            with open(Path(args.output_dir) / "error_log.txt", "a") as f:
-                f.write(f"{img_path.name}: {str(e)}\n")
-            raise e
+            except Exception as e:
+                print(f"❌ 处理图片 {img_path.name} 时发生错误: {str(e)}")
+                with open(Path(args.output_dir) / "error_log.txt", "a") as f:
+                    f.write(f"{img_path.name}: {str(e)}\n")
 
         # 循环结束后打印最终报告
     print("\n" + "=" * 30)

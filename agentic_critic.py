@@ -353,7 +353,7 @@ class PoseGeometricEvaluator:
 # ==========================================
 class GeometricRefinerAgent:
     def __init__(self, pose_extractor, edit_model='qwen-image-2.0-pro', disp_thresh=15.0, angle_thresh=10.0,
-                 max_iterations=1):
+                 max_iterations=3):
         self.edit_model = edit_model
         self.max_iterations = max_iterations
 
@@ -534,7 +534,7 @@ class AgenticImageEditor:
     def __init__(self, edit_model='qwen-image-2.0-pro', eval_model='qwen3.6-plus'):
         self.edit_model = edit_model
         self.eval_model = eval_model
-        self.max_iterations = 1
+        self.max_iterations = 3
         self.base_instruction = """
         [Task: Semantic-Level Limb Completion]
         Objective: Perform local inpainting and completion on the subject's missing limb parts to generate a person with four intact limbs. All four limbs including hands and feets must be clearly visible.
