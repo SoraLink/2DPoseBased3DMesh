@@ -71,6 +71,7 @@ def predict(args, img_path, output_path, pose_extractor, reconstructor, geometri
     generated_image_urls = geometric_refiner.run(kpts_orig, last_generated_image_url, output_path)
     all_path = save_image_from_url(generated_image_urls, "geometric_refiner", output_path)
     final_image_url = generated_image_urls[-1]
+    final_local_path = all_path[-1]
 
     # ==========================================
     # 5. 3D Mesh 恢复
@@ -98,7 +99,7 @@ def predict(args, img_path, output_path, pose_extractor, reconstructor, geometri
         base_name = os.path.basename(img_path).split('.')[0]
         mesh_save_path = os.path.join(output_path, f"{base_name}_mesh.obj")
 
-        mesh_save_path, pred_joints_3d, pred_cam = reconstructor.predict_mesh(img_pil, mesh_save_path)
+        mesh_save_path, pred_joints_3d, pred_cam = reconstructor.predict_mesh(final_local_path, mesh_save_path)
         print(f"✅ 3D Mesh 已保存至: {mesh_save_path}")
         # ==========================================
         # 6. 精确截肢 (Multi-Mesh Truncation)
