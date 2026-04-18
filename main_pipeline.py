@@ -248,7 +248,8 @@ def predict(args, img_path, output_path, pose_extractor, reconstructor, geometri
             )
             mesh = mesh_cutter.process_multiple_cuts(
                 mesh_path=mesh_save_path,
-                cut_tasks=cut_tasks
+                cut_tasks=cut_tasks,
+                M_inv=M_inv,
             )
         else:
             raise ValueError("No residual bone cutting tasks found.")
