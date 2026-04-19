@@ -112,7 +112,19 @@ class ResidualMeshCutter:
         new_pt = M_inv @ point
         return new_pt[:2]
 
+    def _dist_to_bone_segment(self, vertices, bone_start, bone_end):
+        """计算网格所有顶点到指定骨骼线段的垂直距离，用于划定专属手术区"""
+        bone_vec = bone_end - bone_start
+        length = np.linalg.norm(bone_vec)
+        if length < 1e-6:
+            return np.linalg.norm(vertices - bone_start, axis=1)
 
+        bone_dir = bone_vec / length
+        proj = np.dot(vertices - bone_start, bone_dir)
+        proj = np.clip(proj, 0.0, length)
+
+        closest_pts = bone_start + np.outer(proj, bone_dir)
+        return np.linalg.norm(vertices - closest_pts, axis=1)
 
     def process_multiple_cuts(self, mesh_path, cut_tasks, M_inv=None):
         """
@@ -127,57 +139,59 @@ class ResidualMeshCutter:
         has_cut = False
 
         for task in cut_tasks:
-            print(f"   -> 处理部位: {task['name']}")
+            part_name = task.get('name', '未知部位')
+            print(f"   -> 处理部位: {part_name}")
 
-            # pt_calibrated = self._apply_calibration(task['pt_2d'], M_inv)
-            # ray_dir = self._get_ray_direction(pt_calibrated)
+            # 使用你最新的 2D 投影比例算法
             lambda_cut = self._calculate_exact_cut_proportion_2d_driven(task['pt_2d'], task['start_3d'], task['end_3d'])
-            # lambda_cut = self._calculate_exact_cut_proportion(ray_dir, task['start_3d'], task['end_3d'])
-            # debug = self.last_debug_info
 
-            # print(f"📊 [几何鉴定] 部位: {task['name']}")
-            # print(f"   -> 射线与骨骼 3D 最短距离: {debug['miss_dist']:.4f} 米")
-            # print(f"   -> 射线深度 (Ray Depth): {debug['ray_depth']:.2f} 米")
-            # print(f"   -> 原始 Lambda (未 Clip): {debug['lambda_raw']:.4f}")
             cut_origin = task['start_3d'] + lambda_cut * (task['end_3d'] - task['start_3d'])
             cut_normal = task['start_3d'] - task['end_3d']
             cut_normal = cut_normal / np.linalg.norm(cut_normal)
 
-            # 🌟 关键：把切面中心和法向量存下来，给后面的“拔高鼓包”环节使用
+            # 存下来给鼓包用
             task['cut_origin'] = cut_origin
             task['cut_normal'] = cut_normal
 
+            # 1. 计算截面 (法平面以下)
             signed_dist = np.dot(mesh.vertices - cut_origin, cut_normal)
-            neg_indices = np.where(signed_dist < 0)[0]
 
-            if len(neg_indices) == 0:
+            # 2. 计算顶点到当前骨骼的距离 (专属手术区)
+            dists_to_bone = self._dist_to_bone_segment(mesh.vertices, task['start_3d'], task['end_3d'])
+
+            # 3. 自适应护盾半径 (骨头的 40% 粗细)
+            bone_length = np.linalg.norm(task['end_3d'] - task['start_3d'])
+            adaptive_radius = bone_length * 0.40
+
+            # 4. 锁定要被切掉的肉 (必须在刀刃下方，且在这根骨头附近)
+            cut_vertices = np.where((signed_dist < 0) & (dists_to_bone < adaptive_radius))[0]
+
+            if len(cut_vertices) == 0:
+                print(f"      ⚠️ 未命中有效网格，跳过。")
                 continue
 
-            graph = mesh.vertex_adjacency_graph
-            subgraph = graph.subgraph(neg_indices)
-            components = list(nx.connected_components(subgraph))
+            # 5. 挖掉选中的肉
+            keep_vertex_mask = np.ones(len(mesh.vertices), dtype=bool)
+            keep_vertex_mask[cut_vertices] = False
 
-            target_component = []
-            min_dist = float('inf')
-            for comp in components:
-                comp_list = list(comp)
-                dists = np.linalg.norm(mesh.vertices[comp_list] - cut_origin, axis=1)
-                curr_min = np.min(dists)
-                if curr_min < min_dist:
-                    min_dist = curr_min
-                    target_component = comp_list
+            keep_face_mask = keep_vertex_mask[mesh.faces].all(axis=1)
+            mesh.update_faces(keep_face_mask)
+            mesh.remove_unreferenced_vertices()
 
-            if min_dist < 0.15:
-                keep_vertex_mask = np.ones(len(mesh.vertices), dtype=bool)
-                keep_vertex_mask[target_component] = False
+            # 6. 核心修复：只保留最大的连通块 (身体)，悬空的残肢直接当垃圾丢弃
+            graph_after = mesh.vertex_adjacency_graph
+            components_after = list(nx.connected_components(graph_after))
 
-                keep_face_mask = keep_vertex_mask[mesh.faces].all(axis=1)
-                mesh.update_faces(keep_face_mask)
+            if components_after:
+                largest_component = max(components_after, key=len)
+                keep_body_mask = np.zeros(len(mesh.vertices), dtype=bool)
+                keep_body_mask[list(largest_component)] = True
+
+                mesh.update_faces(keep_body_mask[mesh.faces].all(axis=1))
                 mesh.remove_unreferenced_vertices()
-                print(f"      ✅ 切除成功 (Lambda: {lambda_cut:.2f})")
-                has_cut = True
-            else:
-                print(f"      ⚠️ 坐标校准后仍偏离肢体，放弃切割以保护主体。")
+
+            print(f"      ✅ 切除成功 (Lambda: {lambda_cut:.2f})")
+            has_cut = True
 
         output_path = mesh_path.replace(".obj", "_truncated.obj")
 
@@ -186,7 +200,7 @@ class ResidualMeshCutter:
             return mesh
 
         # ==========================================================
-        # 🚀 第一阶段：PyMeshLab 拓扑封口与细分 (制造致密的平坦盖子)
+        # 第一阶段：PyMeshLab 拓扑封口与细分
         # ==========================================================
         print(f"      -> 开始拓扑重建 (Watertight 封口)...")
         temp_obj_path = mesh_path.replace(".obj", "_temp_hole.obj")
@@ -197,7 +211,6 @@ class ResidualMeshCutter:
 
         try:
             ms.meshing_close_holes(maxholesize=3000, newfaceselected=True)
-            # 迭代2次细分，给盖子铺满密集的顶点
             ms.meshing_surface_subdivision_midpoint(iterations=2, selected=True)
         except Exception as e:
             print(f"      ⚠️ PyMeshLab 处理异常: {e}")
@@ -207,7 +220,7 @@ class ResidualMeshCutter:
             os.remove(temp_obj_path)
 
         # ==========================================================
-        # 🚀 第二阶段：Trimesh 底层顶点干预 (真正的物理顶出鼓包)
+        # 第二阶段：Trimesh 自适应物理顶出鼓包
         # ==========================================================
         print(f"      -> 开始施加端点物理膨胀...")
         sealed_mesh = trimesh.load(output_path, process=False)
@@ -219,27 +232,24 @@ class ResidualMeshCutter:
             c_origin = task['cut_origin']
             c_normal = task['cut_normal']
 
-            # 计算所有顶点到这个截断面中心的距离
             distances = np.linalg.norm(sealed_mesh.vertices - c_origin, axis=1)
 
-            # 设定残肢端点的波及半径 (这里设为 8 厘米，一般人类大腿/小腿切面差不多这么大)
-            radius = 0.08
-            mask = distances < radius
+            # 让鼓包的范围和突起程度也自适应骨骼长度
+            bone_len_for_bulge = np.linalg.norm(task['end_3d'] - task['start_3d'])
+            bulge_radius = bone_len_for_bulge * 0.40
+
+            mask = distances < bulge_radius
 
             if np.any(mask):
-                # 核心魔法：使用抛物线方程。越靠近截面中心，向外拔出的力量越大；越靠近大腿边缘，力量越小 (平滑过渡)
-                weights = np.clip(1.0 - (distances[mask] / radius) ** 2, 0.0, 1.0)
+                weights = np.clip(1.0 - (distances[mask] / bulge_radius) ** 2, 0.0, 1.0)
 
-                # 🎯 想要多鼓，就调这个参数！目前是向外顶出 4 厘米 (0.04)。如果觉得不够，改成 0.06 或 0.08
-                max_bulge = 0.06
+                # 鼓包突起程度 (骨头长度的 15%)
+                max_bulge = bone_len_for_bulge * 0.15
                 displacement = np.outer(weights * max_bulge, -c_normal)
 
-                # 暴力干预：让这批顶点沿着法向量突围
                 sealed_mesh.vertices[mask] += displacement
 
-        # 最后，进行一次轻量级的全局网格平滑，把刚才我们手动拉扯的接缝处抹平，让半球完美融入大腿
         trimesh.smoothing.filter_laplacian(sealed_mesh, iterations=4)
-
         sealed_mesh.export(output_path)
         print("      ✅ 已成功生成完美弧度残肢端点。")
 
