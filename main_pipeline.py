@@ -40,7 +40,7 @@ def parse_args():
     parser.add_argument('--annotation_file', type=str,
                         default='./data/train_final.json',
                         help='Path to the annotation file (optional)')
-    parser.add_argument('--output_dir', default='./workdir', type=str)
+    parser.add_argument('--output_dir', default='./workdir4', type=str)
 
     return parser.parse_args()
 
@@ -313,50 +313,71 @@ def predict(args, img_path, output_path, pose_extractor, reconstructor, geometri
 
 
 def project_mesh_overlay(image_path, mesh, M_inv, global_cam, output_dir):
-    # 1. 计算逆矩阵：Gen -> Orig
-    M_augmented = np.vstack([M_inv, [0, 0, 1]])
-    M_gen_to_orig = np.linalg.inv(M_augmented)[:2, :]
+    """
+    通过将仿射变换集成进投影矩阵，实现 3D Mesh 到原图的精准投影
+    """
+    # 1. 提取生成图空间的相机内参
+    f_gen = global_cam['focal']  # [fx, fy]
+    c_gen = global_cam['princpt']  # [cx, cy]
 
-    focal = global_cam['focal']
-    princpt = global_cam['princpt']
+    # 2. 构造生成图空间的投影矩阵 K_gen (3x3)
+    K_gen = np.array([
+        [f_gen[0], 0, c_gen[0]],
+        [0, f_gen[1], c_gen[1]],
+        [0, 0, 1]
+    ])
 
-    # 2. 读取原图以获取尺寸
+    # 3. 将 2x3 的 M_inv (Orig -> Gen) 扩展为 3x3 齐次矩阵
+    M_orig_to_gen = np.vstack([M_inv, [0, 0, 1]])
+
+    # 4. 计算 Gen -> Orig 的变换 (3x3)
+    M_gen_to_orig = np.linalg.inv(M_orig_to_gen)
+
+    # 5. 核心：计算“原图相机投影矩阵”
+    # 原理：P_orig = M_gen_to_orig @ K_gen @ P_camera_space
+    # 这步合并了：投影到2D -> 仿射逆变换回原图
+    P_final = M_gen_to_orig @ K_gen
+
+    # 6. 读取原图
     image_data = np.fromfile(image_path, dtype=np.uint8)
     original_image = cv2.imdecode(image_data, cv2.IMREAD_COLOR)
     h_orig, w_orig = original_image.shape[:2]
 
     vertices = mesh.vertices
-    projected_pts_orig = np.zeros((len(vertices), 2), dtype=np.int32)
+    # 批量进行矩阵运算，效率更高且更准
+    # 将 vertices 转为齐次坐标 (N, 3) -> (3, N)
+    pts_3d = vertices.T
 
-    # 3. 极其优雅的坐标穿梭：3D -> Gen 2D -> Orig 2D
-    for i, vert in enumerate(vertices):
-        curr_x, curr_y, curr_z = vert[0], vert[1], vert[2]
-        if curr_z <= 1e-5: curr_z = 1e-5
+    # 投影： (3, 3) @ (3, N) = (3, N)
+    pts_2d_homo = P_final @ pts_3d
 
-        # 第一跳：针孔投影到生成图 (Gen) 空间
-        proj_gen_x = focal[0] * (curr_x / curr_z) + princpt[0]
-        proj_gen_y = focal[1] * (curr_y / curr_z) + princpt[1]
+    # 归一化 Z 轴 (w 坐标)
+    # 避免除以 0
+    zs = pts_2d_homo[2, :]
+    zs[zs < 1e-5] = 1e-5
 
-        # 第二跳：通过仿射逆矩阵，映射回原图 (Orig) 空间
-        pt_gen = np.array([proj_gen_x, proj_gen_y, 1.0])
-        pt_orig = M_gen_to_orig @ pt_gen
+    u = pts_2d_homo[0, :] / zs
+    v = pts_2d_homo[1, :] / zs
 
-        projected_pts_orig[i, 0] = int(pt_orig[0])
-        projected_pts_orig[i, 1] = int(pt_orig[1])
+    projected_pts_orig = np.stack([u, v], axis=1).astype(np.int32)
 
-    # 4. 直接在原图尺寸上绘制，告别粗糙的 cv2.warpAffine 图像变形！
+    # 7. 绘制 Mask
     mask_orig = np.zeros((h_orig, w_orig), dtype=np.uint8)
     valid_faces = mesh.faces.astype(np.int32)
-    for face in valid_faces:
-        pts = projected_pts_orig[face].reshape((-1, 1, 2))
-        cv2.fillPoly(mask_orig, [pts], 255)
 
-    # 混合叠加 (后面这块代码不变)
+    # 过滤掉在相机背后的顶点面片
+    for face in valid_faces:
+        if np.all(zs[face] > 0.1):  # 只画在相机前方的面
+            pts = projected_pts_orig[face].reshape((-1, 1, 2))
+            cv2.fillPoly(mask_orig, [pts], 255)
+
+    # 8. 混合叠加
     overlay_color = np.zeros_like(original_image)
-    overlay_color[:] = [0, 255, 0]
-    output_image = original_image.copy()
+    overlay_color[:] = [0, 255, 0]  # 绿色 Mask
+
     mask_bool = (mask_orig > 127)
-    output_image = cv2.addWeighted(overlay_color, 0.5, output_image, 0.5, 0, dst=output_image)
+    output_image = original_image.copy()
+    output_image = cv2.addWeighted(overlay_color, 0.5, output_image, 0.5, 0)
     output_image[~mask_bool] = original_image[~mask_bool]
 
     # 保存
@@ -423,7 +444,7 @@ def get_final_calibration_matrix(kpts_orig, kpts_gen, image_path):
     current_img_h = img.shape[0]
 
     # 1. 引入头部和躯干的全部强刚性特征点
-    candidate_indices = [0, 1, 2, 3, 4, 5, 6, 11, 12]
+    candidate_indices = [i for i in range(17) if kpts_orig[i][2] > 0.3]
 
     valid_src = []
     valid_dst = []
@@ -482,6 +503,41 @@ def save_image_from_url(urls, source, save_dir):
             print(f"❌ 下载失败: {e}")
     return all_path
 
+def draw_keypoints_cv2(image_path, keypoints, color=(0, 0, 255), radius=5, thickness=-1, font=cv2.FONT_HERSHEY_SIMPLEX, font_scale=0.6, font_color=(255, 0, 0), font_thickness=2):
+    """
+    使用 OpenCV 在图片上绘制关键点及其索引（适配中文说明）
+    """
+    # 1. 读取图像
+    img = cv2.imread(str(image_path))
+    if img is None:
+        print(f"⚠️ 无法读取图片：{image_path}")
+        return
+
+    # 2. 遍历关键点并绘制
+    for i, pt in enumerate(keypoints):
+        x, y = int(pt[0]), int(pt[1])
+        # 适配图像边界检查
+        if 0 <= x < img.shape[1] and 0 <= y < img.shape[0]:
+            # --- 适配绘制关键点圆圈 ---
+            cv2.circle(img, (x, y), radius, color, thickness)
+            # --- 适配绘制关键点索引文本 ---
+            # 为了防止文本超出边界或遮挡关键点，可以根据坐标微调文本位置
+            text_pos = (x + radius, y - radius)
+            cv2.putText(img, str(i), text_pos, font, font_scale, font_color, font_thickness, cv2.LINE_AA)
+        else:
+            print(f"⚠️ 关键点索引 {i} ({x}, {y}) 超出图像范围 {img.shape[1]}x{img.shape[0]}")
+
+    # 3. 显示图像 (可选)
+    cv2.imshow('OpenCV 关键点与索引可视化示例', img)
+    print("窗口已打开，按下任意键关闭...")
+    cv2.waitKey(0)
+    cv2.destroyAllWindows()
+
+    # 4. 保存图像 (可选)
+    save_path = image_path.replace('.', '_kpts_idx_cv22.')
+    cv2.imwrite(save_path, img)
+    print(f"✅ 适配绘制后的图像已保存至：{save_path}")
+
 def main(args):
     miou_total = 0
     mpjpe_intact_total = 0
@@ -490,6 +546,7 @@ def main(args):
     pose_extractor = PoseExtractor(config_file=args.pose_config,
                                    checkpoint_file=args.pose_ckpt,
                                    device=args.device)
+
     reconstructor = ReconstructionEngine()
     geometric_refiner = GeometricRefinerAgent(pose_extractor)
     image_editor = AgenticImageEditor()
@@ -500,17 +557,21 @@ def main(args):
     image_files = [
         f for f in image_dir.rglob('*') if f.suffix.lower() in valid_extensions
     ]
+    log_filename = Path(args.output_dir) / "log.txt"
 
     for img_path in image_files:
         current_output_dir = Path(args.output_dir) / img_path.stem
         current_output_dir.mkdir(parents=True, exist_ok=True)
-        while True:
+        attempts = 0
+
+        while attempts < 3:
             try:
                 print(
                     f"\n[Main] 📥 正在处理第 {success_count + 1} 张成功样本 (总进度: {image_files.index(img_path) + 1}/{len(image_files)}): {img_path.name}")
 
                 miou, intact, residual = predict(args, str(img_path), str(current_output_dir),
                                                  pose_extractor, reconstructor, geometric_refiner, image_editor, sam_predictor)
+
 
                 # 累加分数
                 miou_total += miou
@@ -527,9 +588,14 @@ def main(args):
                 print(f"📊 当前平均 mIoU: {avg_miou:.4f}")
                 print(f"📊 当前平均 MPJPE (Intact): {avg_intact:.2f} px")
                 print(f"📊 当前平均 MPJPE (Residual): {avg_residual:.2f} px")
+                with open(log_filename, 'a') as log_file:
+                    log_file.write(f"{img_path.name} | mIoU: {miou:.4f} | Intact MPJPE: {intact:.2f} | Residual MPJPE: {residual:.2f}\n")
+                    log_file.write(f"avg mIoU: {avg_miou:.4f} | avg Intact MPJPE: {avg_intact:.2f} | avg Residual MPJPE: {avg_residual:.2f}\n")
+                    log_file.write(f"----------------------------------------\n")
                 break
 
             except Exception as e:
+                attempts += 1
                 print(f"❌ 处理图片 {img_path.name} 时发生错误: {str(e)}")
                 with open(Path(args.output_dir) / "error_log.txt", "a") as f:
                     f.write(f"{img_path.name}: {str(e)}\n")
