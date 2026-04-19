@@ -426,34 +426,37 @@ class GeometricRefinerAgent:
                 "content": content_list
             }
         ]
-
-        try:
-            # 2. 发起同步调用
-            response = MultiModalConversation.call(
-                api_key=os.getenv("DASHSCOPE_API_KEY"),
-                model=self.edit_model,
-                messages=messages,
-                stream=False,
-                n=1,
-                seed=42,
-                guidance_scale=7.0,
-                watermark=False,
-                negative_prompt="shifting torso, changing joint angles, redrawing background, missing limbs",
-                prompt_extend=False
-            )
+        attempt = 0
+        while attempt < 3:
+            try:
+                # 2. 发起同步调用
+                response = MultiModalConversation.call(
+                    api_key=os.getenv("DASHSCOPE_API_KEY"),
+                    model=self.edit_model,
+                    messages=messages,
+                    stream=False,
+                    n=1,
+                    seed=42,
+                    guidance_scale=7.0,
+                    watermark=False,
+                    negative_prompt="shifting torso, changing joint angles, redrawing background, missing limbs",
+                    prompt_extend=False
+                )
 
             # 3. 提取返回的干净 URL
-            if response.status_code == 200:
-                for content in response.output.choices[0].message.content:
-                    if 'image' in content:
-                        print("成功生成图像{}".format(content['image']))
-                        return content['image']
-                raise RuntimeError("❌ API 返回了 200，但未找到图片链接。")
-            else:
-                raise RuntimeError(f"❌ 图像生成失败: HTTP {response.status_code}, {response.message}")
+                if response.status_code == 200:
+                    for content in response.output.choices[0].message.content:
+                        if 'image' in content:
+                            print("成功生成图像{}".format(content['image']))
+                            return content['image']
+                    raise RuntimeError("❌ API 返回了 200，但未找到图片链接。")
+                else:
+                    raise RuntimeError(f"❌ 图像生成失败: HTTP {response.status_code}, {response.message}")
 
-        except Exception as e:
-            raise RuntimeError(f"❌ 大模型 API 调用崩溃: {str(e)}")
+            except Exception as e:
+                attempt += 1
+                time.sleep(3)
+                print(f"❌ 大模型 API 调用崩溃: {str(e)}")
 
     def run(self, kpts_orig, initial_gen_url, output_dir, mask_url=None):
         print("\n" + "=" * 50)
@@ -520,6 +523,8 @@ class GeometricRefinerAgent:
                 time.sleep(5)
                 current_url = self.edit_image(current_url, current_prompt, skeleton_url=skeleton_oss_url,
                                               mask_url=mask_url)
+                if current_url is None:
+                    continue
                 generated_image_urls.append(current_url)
 
             except Exception as e:
@@ -582,39 +587,41 @@ class AgenticImageEditor:
         # 如果有 mask_url，也塞进 content 列表里
         if mask_url:
             messages[0]["content"].insert(1, {"image": mask_url})
+        attempt = 0
+        while attempt < 3:
+            try:
+                # 2. 发起同步调用 (程序会在这里耐心等待，直到阿里云把图画完)
+                response = MultiModalConversation.call(
+                    api_key=os.getenv("DASHSCOPE_API_KEY"),
+                    model=self.edit_model,
+                    messages=messages,
+                    stream=False,
+                    n=1,
+                    watermark=False,
+                    seed=42,
+                    guidance_scale=7.0,
+                    # 你的负向提示词完整保留
+                    negative_prompt="deformed torso, changing existing limb angles, distorted joints, redrawing entire person, extra fingers, anatomical nonsense, missing limbs",
+                    # 强烈建议设为 False，防止模型自己乱加词破坏你的严苛医学约束
+                    prompt_extend=False
+                )
 
-        try:
-            # 2. 发起同步调用 (程序会在这里耐心等待，直到阿里云把图画完)
-            response = MultiModalConversation.call(
-                api_key=os.getenv("DASHSCOPE_API_KEY"),
-                model=self.edit_model,
-                messages=messages,
-                stream=False,
-                n=1,
-                watermark=False,
-                seed=42,
-                guidance_scale=7.0,
-                # 你的负向提示词完整保留
-                negative_prompt="deformed torso, changing existing limb angles, distorted joints, redrawing entire person, extra fingers, anatomical nonsense, missing limbs",
-                # 强烈建议设为 False，防止模型自己乱加词破坏你的严苛医学约束
-                prompt_extend=False
-            )
+                # 3. 解析并返回干净的 URL
+                if response.status_code == 200:
+                    for content in response.output.choices[0].message.content:
+                        if 'image' in content:
+                            result_url = content['image']
+                            print(f"✅ 生成成功，新图像 URL: {result_url}")
+                            return result_url
+                    raise RuntimeError("❌ API 返回了 200 成功，但内容里没有图片链接。")
+                else:
+                    error_msg = f"HTTP返回码：{response.status_code}, 错误信息：{response.message}"
+                    raise RuntimeError(f"❌ 图像生成失败: {error_msg}")
 
-            # 3. 解析并返回干净的 URL
-            if response.status_code == 200:
-                for content in response.output.choices[0].message.content:
-                    if 'image' in content:
-                        result_url = content['image']
-                        print(f"✅ 生成成功，新图像 URL: {result_url}")
-                        return result_url
-                raise RuntimeError("❌ API 返回了 200 成功，但内容里没有图片链接。")
-            else:
-                error_msg = f"HTTP返回码：{response.status_code}, 错误信息：{response.message}"
-                raise RuntimeError(f"❌ 图像生成失败: {error_msg}")
-
-        except Exception as e:
-            # 捕获底层的网络断连、超时等异常，直接抛出清晰的报错
-            raise RuntimeError(f"❌ 大模型 API 调用崩溃: {str(e)}")
+            except Exception as e:
+                # 捕获底层的网络断连、超时等异常，直接抛出清晰的报错
+                print(f"❌ 大模型 API 调用崩溃: {str(e)}")
+                time.sleep(3)
 
     def analyze_and_plan(self, image_url, base_instruction, current_step, total_steps, previous_feedback=None):
         """
@@ -754,6 +761,8 @@ class AgenticImageEditor:
             print(f"🎯 [Underlying Edit Prompt]:\n{final_edit_prompt}\n")
             # 1. 执行编辑
             new_generated_url = self.edit_image(current_url, final_edit_prompt, self.base_instruction, mask_url)
+            if new_generated_url is None:
+                continue
             generated_image_urls.append(new_generated_url)
 
             # 2. 自我审视（最后一轮直接返回）
