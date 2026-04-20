@@ -69,12 +69,31 @@ class SAM2Predictor:
             raise FileNotFoundError(f"无法读取图片: {image_path}")
         image_rgb = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
 
+        x_min, y_min = np.min(input_points, axis=0)
+        x_max, y_max = np.max(input_points, axis=0)
+
+        # 2. 增加合理的 Padding (比如 15%)，防止框太紧切到皮肤
+        w_box = x_max - x_min
+        h_box = y_max - y_min
+        pad_x = w_box * 0.15
+        pad_y = h_box * 0.15
+
+        img_h, img_w = image_rgb.shape[:2]
+        box_x_min = max(0, x_min - pad_x)
+        box_y_min = max(0, y_min - pad_y)
+        box_x_max = min(img_w, x_max + pad_x)
+        box_y_max = min(img_h, y_max + pad_y)
+
+        # 构建 SAM2 要求的 Box 格式: shape (1, 4)
+        input_box = np.array([[box_x_min, box_y_min, box_x_max, box_y_max]])
+
         # 3. 生成 Mask
         with torch.inference_mode(), torch.autocast("cuda", dtype=torch.bfloat16):
             self.predictor.set_image(image_rgb)
             masks, scores, logits = self.predictor.predict(
                 point_coords=input_points,
                 point_labels=input_labels,
+                box=input_box,
                 multimask_output=False  # 🚨 核心改动 1：关闭多余输出，让模型只给一个最确定的答案
             )
 
@@ -122,12 +141,31 @@ class SAM2Predictor:
             raise FileNotFoundError(f"无法读取图片: {image_path}")
         image_rgb = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
 
+        x_min, y_min = np.min(input_points, axis=0)
+        x_max, y_max = np.max(input_points, axis=0)
+
+        # 2. 增加合理的 Padding (比如 15%)，防止框太紧切到皮肤
+        w_box = x_max - x_min
+        h_box = y_max - y_min
+        pad_x = w_box * 0.15
+        pad_y = h_box * 0.15
+
+        img_h, img_w = image_rgb.shape[:2]
+        box_x_min = max(0, x_min - pad_x)
+        box_y_min = max(0, y_min - pad_y)
+        box_x_max = min(img_w, x_max + pad_x)
+        box_y_max = min(img_h, y_max + pad_y)
+
+        # 构建 SAM2 要求的 Box 格式: shape (1, 4)
+        input_box = np.array([[box_x_min, box_y_min, box_x_max, box_y_max]])
+
         # 3. 生成 Mask (🚨 核心修改：专门为此场景强制设为 False)
         with torch.inference_mode(), torch.autocast("cuda", dtype=torch.bfloat16):
             self.predictor.set_image(image_rgb)
             masks, scores, logits = self.predictor.predict(
                 point_coords=input_points,
                 point_labels=input_labels,
+                box=input_box,
                 multimask_output=False  # 绝不盲猜面积，只要主体
             )
 
@@ -165,6 +203,24 @@ class SAM2Predictor:
         # 3. 初始化 SAM 2
         device = "cuda" if torch.cuda.is_available() else "cpu"
 
+        x_min, y_min = np.min(input_points, axis=0)
+        x_max, y_max = np.max(input_points, axis=0)
+
+        # 2. 增加合理的 Padding (比如 15%)，防止框太紧切到皮肤
+        w_box = x_max - x_min
+        h_box = y_max - y_min
+        pad_x = w_box * 0.15
+        pad_y = h_box * 0.15
+
+        img_h, img_w = image_rgb.shape[:2]
+        box_x_min = max(0, x_min - pad_x)
+        box_y_min = max(0, y_min - pad_y)
+        box_x_max = min(img_w, x_max + pad_x)
+        box_y_max = min(img_h, y_max + pad_y)
+
+        # 构建 SAM2 要求的 Box 格式: shape (1, 4)
+        input_box = np.array([[box_x_min, box_y_min, box_x_max, box_y_max]])
+
         # 4. 生成 Mask (🌟 修复: 强制 float32 提高精度，消除初级噪声)
         print("正在生成高精度分割 Mask...")
         with torch.inference_mode():
@@ -172,6 +228,7 @@ class SAM2Predictor:
             masks, scores, logits = self.predictor.predict(
                 point_coords=input_points,
                 point_labels=input_labels,
+                box=input_box,
                 multimask_output=False
             )
 
@@ -246,6 +303,24 @@ class SAM2Predictor:
             raise FileNotFoundError(f"无法读取图片: {image_path}")
         image_rgb = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
 
+        x_min, y_min = np.min(input_points, axis=0)
+        x_max, y_max = np.max(input_points, axis=0)
+
+        # 2. 增加合理的 Padding (比如 15%)，防止框太紧切到皮肤
+        w_box = x_max - x_min
+        h_box = y_max - y_min
+        pad_x = w_box * 0.15
+        pad_y = h_box * 0.15
+
+        img_h, img_w = image_rgb.shape[:2]
+        box_x_min = max(0, x_min - pad_x)
+        box_y_min = max(0, y_min - pad_y)
+        box_x_max = min(img_w, x_max + pad_x)
+        box_y_max = min(img_h, y_max + pad_y)
+
+        # 构建 SAM2 要求的 Box 格式: shape (1, 4)
+        input_box = np.array([[box_x_min, box_y_min, box_x_max, box_y_max]])
+
         # 3. 生成 Mask
         print(f"正在处理: {os.path.basename(image_path)}")
         with torch.inference_mode(), torch.autocast("cuda", dtype=torch.bfloat16):
@@ -253,6 +328,7 @@ class SAM2Predictor:
             masks, scores, logits = self.predictor.predict(
                 point_coords=input_points,
                 point_labels=input_labels,
+                box=input_box,
                 multimask_output=False
             )
 
