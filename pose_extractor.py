@@ -24,20 +24,13 @@ class PoseExtractor:
         # 判定点是否可见的全局阈值
         self.score_threshold = 0.3
 
-    def extract_31_keypoints(self, image_url: str) -> np.ndarray:
+    def extract_31_keypoints(self, image_path: str) -> np.ndarray:
         """
         执行推理并返回清洗后的 31 个关键点矩阵，以及一个包含所有残肢信息的列表。
         返回:
             kpts_31: np.ndarray, shape (31, 3)
         """
-        try:
-            response = requests.get(image_url, timeout=15)
-            response.raise_for_status()
-        except requests.exceptions.RequestException as e:
-            raise RuntimeError(f"❌ 无法下载图像 URL: {e}")
-
-        image_array = np.asarray(bytearray(response.content), dtype=np.uint8)
-        img = cv2.imdecode(image_array, cv2.IMREAD_COLOR)
+        img = cv2.imread(image_path, cv2.IMREAD_COLOR)
 
         if img is None:
             raise ValueError("❌ 图像解码失败，URL 可能未返回有效的图片数据。")
@@ -49,7 +42,6 @@ class PoseExtractor:
 
         pred_instances = batch_results[0].pred_instances
         keypoints = pred_instances.keypoints[0]          # shape: [31, 2]
-        keypoint_scores = pred_instances.keypoint_scores[0] # shape: [31] 👈 提取置信度
         types = pred_instances.keypoint_types[0]
 
         kpts_31 = np.zeros((31, 3))

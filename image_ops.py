@@ -5,6 +5,7 @@ import numpy as np
 import base64
 import mimetypes
 
+import requests
 from PIL import Image
 from dotenv import load_dotenv
 from tqdm import tqdm
@@ -12,73 +13,78 @@ from tqdm import tqdm
 
 class ImageProcessor:
     @staticmethod
-    def encode_to_base64(file_path: str) -> str:
+    def encode_file(file_path):
         mime_type, _ = mimetypes.guess_type(file_path)
-        mime_type = mime_type or "image/jpeg"
-        with open(file_path, "rb") as image_file:
-            encoded_string = base64.b64encode(image_file.read()).decode('utf-8')
-        return f"data:{mime_type};base64,{encoded_string}"
+        if not mime_type or not mime_type.startswith("image/"):
+            raise ValueError("不支持或无法识别的图像格式")
+
+        try:
+            with open(file_path, "rb") as image_file:
+                encoded_string = base64.b64encode(
+                    image_file.read()).decode('utf-8')
+            return f"data:{mime_type};base64,{encoded_string}"
+        except IOError as e:
+            raise IOError(f"读取文件时出错: {file_path}, 错误: {str(e)}")
 
     @staticmethod
-    def generate_safe_mask(img_shape, stump_kpts, intact_kpts=None, extension_length=400) -> np.ndarray:
-        """生成自动向下延伸且避开好腿的掩码"""
-        mask_shape = img_shape[:2]
-        joint_upper, joint_stump = stump_kpts
+    def save_image_from_url(url, source, iter, save_dir):
+        os.makedirs(save_dir, exist_ok=True)
 
-        # 1. 基础残肢延伸 Mask (攻击区)
-        stump_mask = np.zeros(mask_shape, dtype=np.uint8)
-        dx = joint_stump[0] - joint_upper[0]
-        dy = max(1, joint_stump[1] - joint_upper[1])  # 防止倒立出错
+        filename = f"{source}_{iter}.jpg"
 
-        length = np.hypot(dx, dy)
-        dir_x, dir_y = dx / length, dy / length
+        save_path = os.path.join(save_dir, filename)
 
-        end_pt = (int(joint_stump[0] + dir_x * extension_length),
-                  int(joint_stump[1] + dir_y * extension_length))
-        stump_pt = (int(joint_stump[0]), int(joint_stump[1]))
+        try:
+            print(f"⬇️ 正在下载图片: {url[:50]}...")
+            response = requests.get(url, timeout=15)
+            response.raise_for_status()  # 检查请求是否成功
 
-        cv2.line(stump_mask, stump_pt, end_pt, 255, thickness=150)
-        cv2.circle(stump_mask, stump_pt, radius=75, color=255, thickness=-1)
+            with open(save_path, 'wb') as file:
+                file.write(response.content)
 
-        # 2. 生成保护区 (如果提供了好腿的关键点)
-        if intact_kpts and len(intact_kpts) >= 2:
-            protection_mask = np.zeros(mask_shape, dtype=np.uint8)
-            for i in range(len(intact_kpts) - 1):
-                pt1 = (int(intact_kpts[i][0]), int(intact_kpts[i][1]))
-                pt2 = (int(intact_kpts[i + 1][0]), int(intact_kpts[i + 1][1]))
-                cv2.line(protection_mask, pt1, pt2, 255, thickness=180)
-
-            kernel = np.ones((15, 15), np.uint8)
-            protection_mask = cv2.dilate(protection_mask, kernel, iterations=1)
-            # 相减抠除
-            stump_mask = cv2.bitwise_and(stump_mask, cv2.bitwise_not(protection_mask))
-
-        # 3. 边缘羽化
-        safe_mask = cv2.GaussianBlur(stump_mask, (41, 41), 0)
-        _, safe_mask = cv2.threshold(safe_mask, 127, 255, cv2.THRESH_BINARY)
-        return safe_mask
-
-    @staticmethod
-    def kinematic_late_fusion(orig_path: str, gen_path: str, mask: np.ndarray, save_path: str) -> str:
-        """Alpha Blending：保证未截肢区域 100% 像素保真"""
-        print("[Fusion] 执行生成图与原图的像素级融合...")
-        orig_img = cv2.imread(orig_path)
-        gen_img = cv2.imread(gen_path)
-
-        if orig_img.shape != gen_img.shape:
-            gen_img = cv2.resize(gen_img, (orig_img.shape[1], orig_img.shape[0]))
-
-        # 对 Mask 进行高阶高斯模糊，实现自然羽化过渡
-        blurred_mask = cv2.GaussianBlur(mask, (51, 51), 0)
-        alpha = blurred_mask.astype(float) / 255.0
-        alpha = np.expand_dims(alpha, axis=-1)
-
-        # 融合: 掩码区用生成图，背景用原图
-        blended_float = gen_img.astype(float) * alpha + orig_img.astype(float) * (1.0 - alpha)
-        blended = np.clip(blended_float, 0, 255).astype(np.uint8)
-
-        cv2.imwrite(save_path, blended)
+            print(f"💾 成功保存到本地: {save_path}")
+        except requests.exceptions.RequestException as e:
+            print(f"❌ 下载失败: {e}")
         return save_path
+
+    @staticmethod
+    def enforce_pure_black_background(image_path, sam2_predictor, kpts_gen, types_orig):
+        """
+        强制洗图：用 SAM2 重新提取人物轮廓，把背景一切非人物像素暴力置为绝对纯黑 (0,0,0)
+        并另存为带有 '_black_bg' 后缀的新文件，避免覆盖原图。
+        """
+        print("🧹 [洗图] 正在清除大模型产生的背景噪声...")
+
+        # 1. 重新提取当前图的 Mask
+        mask = sam2_predictor.get_mask_only(
+            image_path,
+            kpts_gen,
+            types_orig
+        )
+
+        if mask is None:
+            print("⚠️ 无法获取 Mask，跳过背景清洗。")
+            return image_path
+
+        # 2. 读取原图
+        img_bgr = cv2.imread(image_path)
+
+        # 3. 强制黑底 (Mask 为 0 的地方全部赋值为 [0, 0, 0])
+        # 注意：mask 是 255 (前景) 和 0 (背景)
+        img_bgr[mask < 127] = [0, 0, 0]
+
+        # 4. 构建新的保存路径 (image name + _black_bg)
+        dirname = os.path.dirname(image_path)
+        basename = os.path.basename(image_path)
+        name, ext = os.path.splitext(basename)
+        new_filename = f"{name}_black_bg{ext}"
+        new_image_path = os.path.join(dirname, new_filename)
+
+        # 5. 保存到新路径
+        cv2.imwrite(new_image_path, img_bgr)
+        print(f"✨ 背景已恢复至绝对纯黑！已保存为: {new_image_path}")
+
+        return new_image_path
 
 
 import oss2

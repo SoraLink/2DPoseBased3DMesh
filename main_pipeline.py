@@ -11,7 +11,7 @@ from PIL import Image
 from skimage.transform import SimilarityTransform
 
 from pose_extractor import PoseExtractor, read_kpts_annotation
-from image_ops import OSSProcessor
+from image_ops import OSSProcessor, ImageProcessor
 from agentic_critic import AgenticImageEditor, GeometricRefinerAgent
 from reconstruction_3d import ReconstructionEngine
 from residual_mesh_cutter import ResidualMeshCutter
@@ -59,20 +59,16 @@ def predict(args, img_path, output_path, pose_extractor, reconstructor, geometri
     kpts_orig, kpts, types_orig = read_kpts_annotation(img_path, args.annotation_file)
     sam2_img_path, mask = sam2_predictor.segment_subject(img_path, output_path, kpts_orig)
 
-    image_url = OSSProcessor().upload_and_get_url(local_file_path=sam2_img_path)
+    # image_url = ImageProcessor.encode_file(sam2_img_path)
 
     # ==========================================
     # 4. Agentic Loop (生成 -> Critic -> 再生成)
     # ==========================================
     if not isinstance(output_path, str):
         output_path = f"./workdir/output_{int(time.time())}"
-    generated_image_urls = image_editor.run(image_url)
-    last_generated_image_url = generated_image_urls[-1]
-    save_image_from_url(generated_image_urls, "image_editor", output_path)
-    generated_image_urls = geometric_refiner.run(kpts_orig, last_generated_image_url, output_path)
-    all_path = save_image_from_url(generated_image_urls, "geometric_refiner", output_path)
-    final_image_url = generated_image_urls[-1]
-    final_local_path = all_path[-1]
+    generated_image_path = image_editor.run(sam2_img_path, save_dir=output_path)
+    generated_image_path = geometric_refiner.run(kpts_orig, generated_image_path, output_path)
+    final_local_path = generated_image_path
 
     # ==========================================
     # 5. 3D Mesh 恢复
@@ -80,20 +76,11 @@ def predict(args, img_path, output_path, pose_extractor, reconstructor, geometri
     print("\n=== 进入 3D 恢复阶段 ===")
     try:
         # 1. 从 URL 获取图片数据
-        print(f"⬇️ 正在拉取处理完成的网络图片...")
-        response = requests.get(final_image_url, timeout=15)
-        response.raise_for_status()
 
-        # 2. 将二进制数据转换为 numpy 数组，再通过 cv2 解码
-        image_array = np.asarray(bytearray(response.content), dtype=np.uint8)
-        img_bgr = cv2.imdecode(image_array, cv2.IMREAD_COLOR)
+        img_bgr = cv2.imread(final_local_path, cv2.IMREAD_COLOR)
 
         if img_bgr is None:
             raise ValueError("❌ 图片解码失败，可能链接已损坏或不是有效图片格式。")
-
-        # 3. 转换为 RGB (为了你的 3D 模型推理)
-        img_rgb = cv2.cvtColor(img_bgr, cv2.COLOR_BGR2RGB)
-        img_pil = Image.fromarray(img_rgb)
 
         # 4. 执行 3D 恢复
         # 注意: 这里的 img_path 可能依然是你最开始的本地路径，用于提取基础文件名
@@ -214,8 +201,8 @@ def predict(args, img_path, output_path, pose_extractor, reconstructor, geometri
         }
 
         cut_tasks = []
-        kpts_gen = pose_extractor.extract_31_keypoints(final_image_url)  # 重新检测生成图的关键点
-        M_inv = get_final_calibration_matrix(kpts_orig, kpts_gen=kpts_gen, image_path=all_path[-1])  # 这里暂时传 None，后续可以改成实际生成图的关键点
+        kpts_gen = pose_extractor.extract_31_keypoints(final_local_path)  # 重新检测生成图的关键点
+        M_inv = get_final_calibration_matrix(kpts_orig, kpts_gen=kpts_gen, image_path=final_local_path)  # 这里暂时传 None，后续可以改成实际生成图的关键点
 
         mask_gen = sam2_predictor.get_mask_only(
             final_local_path,
@@ -270,8 +257,6 @@ def predict(args, img_path, output_path, pose_extractor, reconstructor, geometri
         # 如果收集到了切割任务，才去执行截断
                     # 如果收集到了切割任务，才去执行截断
         if cut_tasks:
-            gen_h, gen_w = img_bgr.shape[:2]
-
             # 🌟 直接使用原作者推导出的官方全局相机内参
             global_focal = pred_cam['focal']
             global_cx = pred_cam['princpt'][0]
@@ -308,7 +293,7 @@ def predict(args, img_path, output_path, pose_extractor, reconstructor, geometri
         print(f"6. 垂直方向偏差 (Offset Y): {offset_y:.2f} 像素 (正值代表投影偏高)")
         # ================= DEBUG BLOCK END =================
 
-        orig_proj_path, pred_mask_orig, gen_proj_path, pred_mask_gen = project_mesh_overlay(img_path, all_path[-1], mesh, M_inv, global_cam, output_path)  # 将最终 Mesh 投影回原图坐标系，生成 Overlay
+        orig_proj_path, pred_mask_orig, gen_proj_path, pred_mask_gen = project_mesh_overlay(img_path, final_local_path, mesh, M_inv, global_cam, output_path)  # 将最终 Mesh 投影回原图坐标系，生成 Overlay
         sam2_img_path, mask_gt = sam2_predictor.segment_subject2(img_path, output_path, kpts, types_orig)
         miou_score = calculate_miou(pred_mask_orig, mask_gt)
         print(f"📊 [量化评估] 掩码 mIoU 评分: {miou_score:.4f}")
@@ -691,9 +676,9 @@ def main(args):
                                    device=args.device)
 
     reconstructor = ReconstructionEngine()
-    geometric_refiner = GeometricRefinerAgent(pose_extractor)
-    image_editor = AgenticImageEditor()
     sam_predictor = SAM2Predictor()
+    geometric_refiner = GeometricRefinerAgent(pose_extractor, sam_predictor)
+    image_editor = AgenticImageEditor(pose_extractor, sam_predictor)
 
     image_dir = Path(args.img_dir)
     valid_extensions = ('.jpg', '.jpeg', '.png')

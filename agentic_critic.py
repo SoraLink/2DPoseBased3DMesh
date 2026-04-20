@@ -11,7 +11,7 @@ import numpy as np
 from skimage.transform import SimilarityTransform
 
 from auto_param_builder import AutoParamBuilder
-from image_ops import OSSProcessor
+from image_ops import OSSProcessor, ImageProcessor
 from pose_extractor import PoseExtractor
 
 METAINFO = {
@@ -388,11 +388,11 @@ class PoseGeometricEvaluator:
 # 2. 精细校准 Agent (专职处理第二阶段)
 # ==========================================
 class GeometricRefinerAgent:
-    def __init__(self, pose_extractor, edit_model='qwen-image-2.0-pro', disp_thresh=15.0, angle_thresh=10.0,
+    def __init__(self, pose_extractor, sam2_predictor, edit_model='qwen-image-2.0-pro', disp_thresh=15.0, angle_thresh=10.0,
                  max_iterations=3):
         self.edit_model = edit_model
         self.max_iterations = max_iterations
-
+        self.sam2_predictor = sam2_predictor
         self.evaluator = PoseGeometricEvaluator(disp_thresh, angle_thresh)
         self.pose_extractor = pose_extractor
         self.auto_param_builder = AutoParamBuilder()
@@ -456,14 +456,16 @@ class GeometricRefinerAgent:
 
         return kpts_aligned
 
-    def edit_image(self, image_url, prompt, skeleton_url=None, mask_url=None):
+    def edit_image(self, image_path, prompt, skeleton_path, iter, save_dir, mask_url=None):
         print(f"\n🎨 [生成] 调用 {self.edit_model} (同步对话模式)...")
 
+        image = ImageProcessor.encode_file(image_path)
         # 1. 组装新版 API 要求的 messages 结构
-        content_list = [{"image": image_url}]
+        content_list = [{"image": image}]
 
-        if skeleton_url:
-            content_list.append({"image": skeleton_url})
+        if skeleton_path:
+            skeleton = ImageProcessor.encode_file(skeleton_path)
+            content_list.append({"image": skeleton})
 
         # if mask_url:
         #     content_list.append({"image": mask_url})
@@ -498,7 +500,8 @@ class GeometricRefinerAgent:
                     for content in response.output.choices[0].message.content:
                         if 'image' in content:
                             print("成功生成图像{}".format(content['image']))
-                            return content['image']
+                            path = ImageProcessor.save_image_from_url(content['image'], 'geometric_refiner', iter, save_dir)
+                            return path
                     raise RuntimeError("❌ API 返回了 200，但未找到图片链接。")
                 else:
                     raise RuntimeError(f"❌ 图像生成失败: HTTP {response.status_code}, {response.message}")
@@ -508,21 +511,14 @@ class GeometricRefinerAgent:
                 time.sleep(3)
                 print(f"❌ 大模型 API 调用崩溃: {str(e)}")
 
-    def run(self, kpts_orig, initial_gen_url, output_dir, mask_url=None):
+    def run(self, kpts_orig, initial_gen_path, output_dir, mask_url=None):
         print("\n" + "=" * 50)
         print(f"🔬 启动第二阶段: 几何精细校准 Agent")
         print("=" * 50)
-        try:
-            response = requests.get(initial_gen_url, timeout=15)
-            response.raise_for_status()
-        except requests.exceptions.RequestException as e:
-            raise RuntimeError(f"❌ 无法下载图像 URL: {e}")
 
-        image_array = np.asarray(bytearray(response.content), dtype=np.uint8)
-        img = cv2.imdecode(image_array, cv2.IMREAD_COLOR)
+        img = cv2.imread(initial_gen_path, cv2.IMREAD_COLOR)
 
-        current_url = initial_gen_url
-        generated_image_urls = [current_url]
+        current_path = initial_gen_path
 
         eval_params = self.auto_param_builder.infer_params(kpts_orig)
 
@@ -530,7 +526,7 @@ class GeometricRefinerAgent:
             print(f"\n⚙️ 几何校准轮次 {i}/{self.max_iterations}")
 
             # 2. 提取当前生成图的位姿
-            kpts_gen = self.pose_extractor.extract_31_keypoints(current_url)
+            kpts_gen = self.pose_extractor.extract_31_keypoints(current_path)
 
             # 3. 执行评估
             eval_res = self.evaluator.evaluate(
@@ -545,7 +541,7 @@ class GeometricRefinerAgent:
 
             if eval_res["passed"]:
                 print("🎯 [校准通过] 所有几何和位移误差均小于阈值！")
-                return generated_image_urls
+                return current_path
             else:
                 print(f"⚠️ [校准未达标] {eval_res['reason']}")
 
@@ -561,32 +557,37 @@ class GeometricRefinerAgent:
                 # 3.2 在本地画出骨架图
                 # 注意：如果你的图片不是 1024x1024，建议这里动态传入 cv2.imread(本地原图).shape
 
-                local_skeleton_path = draw_pose_skeleton(kpts_target_aligned, kpts_gen, save_dir=output_dir, img_shape=img.shape)
-
-                # 3.3 上传到 OSS 获取 URL
-                skeleton_oss_url = self.oss_processor.upload_and_get_url(local_file_path=local_skeleton_path)
-                print(f"☁️ 骨架图已上传至 OSS: {skeleton_oss_url}")
+                skeleton_path = draw_pose_skeleton(kpts_target_aligned, kpts_gen, save_dir=output_dir, img_shape=img.shape)
 
                 # 3.4 组装 prompt，附带 correction 信息
                 current_prompt = self.refine_instruction
                 # 3.5 调用大模型 (传入原图 + OSS骨架图)
                 time.sleep(5)
-                current_url = self.edit_image(current_url, current_prompt, skeleton_url=skeleton_oss_url,
-                                              mask_url=mask_url)
-                if current_url is None:
+                current_path = self.edit_image(current_path, current_prompt, skeleton_path, i, output_dir, mask_url=mask_url)
+
+                if current_path is None:
                     continue
-                generated_image_urls.append(current_url)
+
+                kpts_gen_new = self.pose_extractor.extract_31_keypoints(current_path)
+                current_path = ImageProcessor.enforce_pure_black_background(
+                    current_path,
+                    self.sam2_predictor,
+                    kpts_gen_new,
+                    [0 for _ in range(len(kpts_gen_new))]  # 沿用你的神仙逻辑
+                )
 
             except Exception as e:
                 print(f"❌ 微调中断: {e}")
                 raise e
-            else:
-                print("🛑 已达最大校准次数，返回当前最优微调结果。")
+        else:
+            print("🛑 已达最大校准次数，返回当前最优微调结果。")
 
-        return generated_image_urls
+        return current_path
 
 class AgenticImageEditor:
-    def __init__(self, edit_model='qwen-image-2.0-pro', eval_model='qwen3.6-plus'):
+    def __init__(self, pose_extractor, sam2_predictor, edit_model='qwen-image-2.0-pro', eval_model='qwen3.6-plus'):
+        self.pose_extractor = pose_extractor
+        self.sam2_predictor = sam2_predictor
         self.edit_model = edit_model
         self.eval_model = eval_model
         self.max_iterations = 3
@@ -615,10 +616,11 @@ class AgenticImageEditor:
         1. Change the background
         """
 
-    def edit_image(self, image_url, action_prompt, base_instruction, mask_url=None):
+    def edit_image(self, image_path, action_prompt, base_instruction, iter, save_dir, mask_url=None):
         print(f"\n🎨 [生成] 调用 {self.edit_model} (同步对话模式)...")
 
         # 1. 组装符合新版 API 要求的 messages 结构
+        image = ImageProcessor.encode_file(image_path)
         prompt = f"""
         {base_instruction}
 
@@ -630,7 +632,7 @@ class AgenticImageEditor:
             {
                 "role": "user",
                 "content": [
-                    {"image": image_url},
+                    {"image": image},
                     {"text": prompt.strip()}
                 ]
             }
@@ -664,7 +666,8 @@ class AgenticImageEditor:
                         if 'image' in content:
                             result_url = content['image']
                             print(f"✅ 生成成功，新图像 URL: {result_url}")
-                            return result_url
+                            path = ImageProcessor.save_image_from_url(result_url, 'image_editor', iter, save_dir)
+                            return path
                     raise RuntimeError("❌ API 返回了 200 成功，但内容里没有图片链接。")
                 else:
                     error_msg = f"HTTP返回码：{response.status_code}, 错误信息：{response.message}"
@@ -675,7 +678,7 @@ class AgenticImageEditor:
                 print(f"❌ 大模型 API 调用崩溃: {str(e)}")
                 time.sleep(3)
 
-    def analyze_and_plan(self, image_url, base_instruction, current_step, total_steps, previous_feedback=None):
+    def analyze_and_plan(self, image_path, base_instruction, current_step, total_steps, previous_feedback=None):
         """
         🧠 Thinking Module: Deep thinking and planning before image generation.
         """
@@ -728,6 +731,7 @@ class AgenticImageEditor:
         # ==========================================
         # 🚀 新增：最大重试 3 次的强健网络请求逻辑
         # ==========================================
+        image = ImageProcessor.encode_file(image_path)
         max_retries = 3
         for attempt in range(max_retries):
             try:
@@ -737,7 +741,7 @@ class AgenticImageEditor:
                     messages=[{
                         "role": "user",
                         "content": [
-                            {"image": image_url},
+                            {"image": image},
                             {"text": think_prompt}
                         ]
                     }],
@@ -778,7 +782,7 @@ class AgenticImageEditor:
                     # 直接抛出异常，让最外层 (predict 函数的 retry) 去接管，或者做其他降级处理
                     raise RuntimeError(f"Agent 思考与 JSON 解析彻底崩溃: {str(e)}")
 
-    def evaluate_image(self, original_url, current_url, original_prompt):
+    def evaluate_image(self, original_path, current_path, original_prompt):
         print(f"\n🔍 [评估] 调用 {self.eval_model} 进行视觉审视...")
 
         eval_prompt = f"""You are a strict Image Quality Auditor. Compare the ORIGINAL and EDITED images.
@@ -795,13 +799,16 @@ class AgenticImageEditor:
           "reason": "Detailed explanation of violations in English (e.g., 'torso distorted', 'limb angle mismatch')",
         }}"""
 
+        original_image = ImageProcessor.encode_file(original_path)
+        current_image = ImageProcessor.encode_file(current_path)
+
         resp = MultiModalConversation.call(
             model=self.eval_model,
             messages=[{
                 "role": "user",
                 "content": [
-                    {"image": original_url},
-                    {"image": current_url},
+                    {"image": original_image},
+                    {"image": current_image},
                     {"text": eval_prompt}
                 ]
             }],
@@ -828,42 +835,49 @@ class AgenticImageEditor:
         except json.JSONDecodeError:
             return {"passed": False, "reason": "JSON_PARSE_ERROR"}
 
-    def run(self, image_url, mask_url=None):
-        generated_image_urls = []
-        current_url = image_url
+    def run(self, image_path, save_dir, mask_url=None):
+        current_image_path = image_path
         previous_feedback = None
         print(f"🚀 启动 Agentic 编辑流程 | 模型: {self.edit_model} + {self.eval_model}")
 
+        new_generated_path = None
         for i in range(1, self.max_iterations + 1):
             print(f"\n{'=' * 40} 第 {i}/{self.max_iterations} 轮 {'=' * 40}")
 
-            plan_result = self.analyze_and_plan(current_url, self.base_instruction, i, self.max_iterations, previous_feedback)
+            plan_result = self.analyze_and_plan(current_image_path, self.base_instruction, i, self.max_iterations, previous_feedback)
             print(f"\n💭 [Agent Thinking]:\n{plan_result['thought_process']}\n")
             final_edit_prompt = plan_result["edit_prompt"] + "\n" + self.constraints
             print(f"🎯 [Underlying Edit Prompt]:\n{final_edit_prompt}\n")
             # 1. 执行编辑
-            new_generated_url = self.edit_image(current_url, final_edit_prompt, self.base_instruction, mask_url)
-            if new_generated_url is None:
+            new_generated_path = self.edit_image(current_image_path, final_edit_prompt, self.base_instruction, mask_url, i, save_dir)
+            if new_generated_path is None:
                 continue
-            generated_image_urls.append(new_generated_url)
+
+            kpts_gen = self.pose_extractor.extract_31_keypoints(new_generated_path)
+            new_generated_path = ImageProcessor.enforce_pure_black_background(
+                new_generated_path,
+                self.sam2_predictor,
+                kpts_gen,
+                [0 for _ in range(len(kpts_gen))],
+            )
 
             # 2. 自我审视（最后一轮直接返回）
             if i < self.max_iterations:
-                eval_res = self.evaluate_image(image_url, new_generated_url, self.base_instruction)
+                eval_res = self.evaluate_image(image_path, new_generated_path, self.base_instruction)
                 print(f"📊 评估: {'✅ 通过' if eval_res['passed'] else '❌ 未通过'}")
                 print(f"📝 原因: {eval_res.get('reason', '-')}")
 
                 if eval_res["passed"]:
                     print("🎉 约束全部满足，提前结束迭代！")
-                    return generated_image_urls
+                    return new_generated_path
 
                 # 3. 动态注入修正指令
                 print("🛠️ 注入修正指令，准备下一轮生成...")
                 previous_feedback = eval_res.get('reason', 'Unknown error.')
                 print(f"⚠️ Flaw detected: {eval_res.get('reason', '-')}. Recorded for reflection in the next iteration.")
-                current_url = new_generated_url
+                current_image_path = new_generated_path
 
             else:
                 print("⚠️ 已达最大迭代次数，返回当前最佳结果。")
 
-        return generated_image_urls
+        return new_generated_path
