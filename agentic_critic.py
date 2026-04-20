@@ -266,39 +266,61 @@ class PoseGeometricEvaluator:
 
     def align_poses(self, kpts_orig, kpts_gen, torso_indices):
         """
-        使用 OpenCV 的相似仿射变换 (平移 + 旋转 + 等比例缩放) 对齐两组关键点。
+        一致性升级：强制使用核心躯干刚体对齐，带安全兜底。
         """
-        # 1. 提取稳定的参考点 (例如躯干)，只拿前两维 (x, y) 坐标
-        # 假设 kpts_orig 和 kpts_gen 都是 (N, 3) 的 numpy 数组
-        candidate_indices = [i for i in range(17) if kpts_orig[i][2] > 0.3]
-        src_pts = kpts_gen[candidate_indices][:, :2].astype(np.float32)
-        dst_pts = kpts_orig[candidate_indices][:, :2].astype(np.float32)
+        # 提取字典中的躯干索引 (通常是 [5, 6, 11, 12])
+        if isinstance(torso_indices, dict):
+            core_idx = list(torso_indices.values())
+        else:
+            core_idx = [int(i) for i in torso_indices]
 
-        # 2. 计算变换矩阵 (2x3 矩阵)
-        # estimateAffinePartial2D 会返回最优的 [旋转+缩放 | 平移] 矩阵
-        transform_matrix, inliers = cv2.estimateAffinePartial2D(
-            src_pts,
-            dst_pts,
-            method=cv2.RANSAC,
-            ransacReprojThreshold=20.0
-        )
+        valid_src = []
+        valid_dst = []
 
-        if transform_matrix is None:
-            print("⚠️ 警告: 无法计算仿射变换矩阵，退回简单的中心点平移。")
-            # 这里可以写你之前的 translation_vector 备用逻辑，防止极少数极端情况报错
-            translation_vector = np.mean(dst_pts, axis=0) - np.mean(src_pts, axis=0)
-            kpts_aligned = kpts_gen.copy()
-            kpts_aligned[:, :2] += translation_vector
-            return kpts_aligned, translation_vector
+        # 获取高置信度的核心点 (Orig为dst, Gen为src)
+        for idx in core_idx:
+            if kpts_orig[idx][2] > 0.3 and kpts_gen[idx][2] > 0.3:
+                valid_src.append(kpts_gen[idx, :2])  # Gen 是要被变换的 source
+                valid_dst.append(kpts_orig[idx, :2])  # Orig 是目标 destination
 
-        # 3. 将计算出的变换矩阵，应用到生成图的 **所有** 关键点上
+        src_pts = np.array(valid_src, dtype=np.float32)
+        dst_pts = np.array(valid_dst, dtype=np.float32)
+
+        # 策略 A: 极致刚体对齐
+        if len(src_pts) >= 3:
+            transform_matrix, inliers = cv2.estimateAffinePartial2D(
+                src_pts, dst_pts, method=0
+            )
+        # 策略 B: 兜底机制 (剔除五官)
+        else:
+            fallback_indices = [i for i in range(5, 17)]
+            fb_src = []
+            fb_dst = []
+            for i in fallback_indices:
+                if kpts_orig[i][2] > 0.3 and kpts_gen[i][2] > 0.3:
+                    fb_src.append(kpts_gen[i, :2])
+                    fb_dst.append(kpts_orig[i, :2])
+
+            fb_src_pts = np.array(fb_src, dtype=np.float32)
+            fb_dst_pts = np.array(fb_dst, dtype=np.float32)
+
+            if len(fb_src_pts) < 3:
+                print("⚠️ 警告: 无法计算仿射变换矩阵，退回简单的中心点平移。")
+                translation_vector = np.mean(dst_pts, axis=0) - np.mean(src_pts, axis=0)
+                kpts_aligned = kpts_gen.copy()
+                kpts_aligned[:, :2] += translation_vector
+                return kpts_aligned, translation_vector
+
+            transform_matrix, inliers = cv2.estimateAffinePartial2D(
+                fb_src_pts, fb_dst_pts, method=cv2.RANSAC, ransacReprojThreshold=20.0
+            )
+
+        # 3. 将计算出的变换矩阵，应用到生成图的所有关键点上
         all_src_pts = kpts_gen[:, :2].astype(np.float32)
-
-        # cv2.transform 要求输入的形状是 (1, N, 2)
         all_src_pts_reshaped = np.array([all_src_pts])
         aligned_pts_2d = cv2.transform(all_src_pts_reshaped, transform_matrix)[0]
 
-        # 4. 把对齐后的 2D 坐标拼回原来的 (N, 3) 数组中 (保留原来的 Z 轴或置信度)
+        # 4. 拼回原数组
         kpts_aligned = kpts_gen.copy()
         kpts_aligned[:, :2] = aligned_pts_2d
 
@@ -383,22 +405,29 @@ class GeometricRefinerAgent:
 
     def align_orig_to_gen(self, kpts_orig, kpts_gen, torso_indices):
         """
-        把原始的完美目标位姿 (orig)，通过仿射变换对齐到当前生成图 (gen) 的躯干上。
+        为大模型提供完美的骨架引导：Orig 匹配到 Gen。
         """
-        # 确保提取的是干净的整数列表
         if isinstance(torso_indices, dict):
             torso_idx = list(torso_indices.values())
         else:
             torso_idx = [int(i) for i in torso_indices]
 
-        # orig(src) -> gen(dst)
-        src_pts = kpts_orig[torso_idx][:, :2].astype(np.float32)
-        dst_pts = kpts_gen[torso_idx][:, :2].astype(np.float32)
+        valid_src = []
+        valid_dst = []
 
-        matrix, _ = cv2.estimateAffinePartial2D(src_pts, dst_pts)
+        for idx in torso_idx:
+            if kpts_orig[idx][2] > 0.3 and kpts_gen[idx][2] > 0.3:
+                valid_src.append(kpts_orig[idx, :2])  # Orig -> src
+                valid_dst.append(kpts_gen[idx, :2])  # Gen -> dst
 
-        if matrix is None:
-            print("⚠️ 无法计算仿射变换，回退到平移对齐...")
+        src_pts = np.array(valid_src, dtype=np.float32)
+        dst_pts = np.array(valid_dst, dtype=np.float32)
+
+        if len(src_pts) >= 3:
+            matrix, _ = cv2.estimateAffinePartial2D(src_pts, dst_pts, method=0)
+        else:
+            # 兜底：直接降级为平移，因为这是准备给大模型看图，不需要复杂的带噪声变换
+            print("⚠️ 无法提取足够躯干点计算仿射变换，回退到平移对齐...")
             translation = np.mean(dst_pts, axis=0) - np.mean(src_pts, axis=0)
             kpts_aligned = kpts_orig.copy()
             kpts_aligned[:, :2] += translation
