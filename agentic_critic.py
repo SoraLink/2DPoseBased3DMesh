@@ -8,6 +8,7 @@ import cv2
 import requests
 from dashscope import MultiModalConversation
 import numpy as np
+from skimage.transform import SimilarityTransform
 
 from auto_param_builder import AutoParamBuilder
 from image_ops import OSSProcessor
@@ -288,9 +289,13 @@ class PoseGeometricEvaluator:
 
         # 策略 A: 极致刚体对齐
         if len(src_pts) >= 3:
-            transform_matrix, inliers = cv2.estimateAffinePartial2D(
-                src_pts, dst_pts, method=0
-            )
+            tform = SimilarityTransform()
+
+            # 2. 喂入原图点和生成点，自动拟合 (内部就是你不想手写的 Umeyama 算法)
+            tform.estimate(src_pts, dst_pts)
+
+            # 3. tform.params 返回的是 3x3 齐次矩阵，OpenCV 只要前两行，所以切片 [:2, :]
+            transform_matrix = tform.params[:2, :]
         # 策略 B: 兜底机制 (剔除五官)
         else:
             fallback_indices = [i for i in range(5, 17)]
@@ -311,9 +316,13 @@ class PoseGeometricEvaluator:
                 kpts_aligned[:, :2] += translation_vector
                 return kpts_aligned, translation_vector
 
-            transform_matrix, inliers = cv2.estimateAffinePartial2D(
-                fb_src_pts, fb_dst_pts, method=cv2.RANSAC, ransacReprojThreshold=20.0
-            )
+            tform = SimilarityTransform()
+
+            # 2. 喂入原图点和生成点，自动拟合 (内部就是你不想手写的 Umeyama 算法)
+            tform.estimate(fb_src_pts, fb_dst_pts)
+
+            # 3. tform.params 返回的是 3x3 齐次矩阵，OpenCV 只要前两行，所以切片 [:2, :]
+            transform_matrix = tform.params[:2, :]
 
         # 3. 将计算出的变换矩阵，应用到生成图的所有关键点上
         all_src_pts = kpts_gen[:, :2].astype(np.float32)
@@ -424,7 +433,13 @@ class GeometricRefinerAgent:
         dst_pts = np.array(valid_dst, dtype=np.float32)
 
         if len(src_pts) >= 3:
-            matrix, _ = cv2.estimateAffinePartial2D(src_pts, dst_pts, method=0)
+            tform = SimilarityTransform()
+
+            # 2. 喂入原图点和生成点，自动拟合 (内部就是你不想手写的 Umeyama 算法)
+            tform.estimate(src_pts, dst_pts)
+
+            # 3. tform.params 返回的是 3x3 齐次矩阵，OpenCV 只要前两行，所以切片 [:2, :]
+            matrix = tform.params[:2, :]
         else:
             # 兜底：直接降级为平移，因为这是准备给大模型看图，不需要复杂的带噪声变换
             print("⚠️ 无法提取足够躯干点计算仿射变换，回退到平移对齐...")

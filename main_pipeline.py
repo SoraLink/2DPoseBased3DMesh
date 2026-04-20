@@ -8,6 +8,7 @@ import time
 import cv2
 import argparse
 from PIL import Image
+from skimage.transform import SimilarityTransform
 
 from pose_extractor import PoseExtractor, read_kpts_annotation
 from image_ops import OSSProcessor
@@ -578,11 +579,16 @@ def get_final_calibration_matrix(kpts_orig, kpts_gen, image_path):
     # 🌟 策略 A：如果核心点充足 (>=3)，使用极致刚体对齐
     # ========================================================
     if len(src) >= 3:
-        print("📐 [Calibration] 使用【核心躯干刚体】进行极致对齐 (method=0)")
-        M_calib, inliers = cv2.estimateAffinePartial2D(
-            src, dst,
-            method=0  # 🚨 强制最小二乘法，绝不抛弃这几个核心点
-        )
+        print("📐 [Calibration] 使用 skimage SimilarityTransform 算出无损最优矩阵")
+
+        # 1. 初始化相似变换对象 (包含缩放、旋转、平移)
+        tform = SimilarityTransform()
+
+        # 2. 喂入原图点和生成点，自动拟合 (内部就是你不想手写的 Umeyama 算法)
+        tform.estimate(src, dst)
+
+        # 3. tform.params 返回的是 3x3 齐次矩阵，OpenCV 只要前两行，所以切片 [:2, :]
+        M_calib = tform.params[:2, :]
 
     # ========================================================
     # ⚠️ 策略 B (兜底)：如果下半身被遮挡，退回不包含头部的全骨架 RANSAC 对齐
@@ -605,6 +611,7 @@ def get_final_calibration_matrix(kpts_orig, kpts_gen, image_path):
             raise ValueError("严重警告：有效对齐锚点不足 3 个，仿射矩阵计算失败！")
 
         # 因为四肢游离性强，必须开启 RANSAC 剔除被大模型画飞的畸形手臂/腿
+
         M_calib, inliers = cv2.estimateAffinePartial2D(
             fb_src, fb_dst,
             method=cv2.RANSAC,
