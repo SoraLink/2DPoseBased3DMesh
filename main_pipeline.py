@@ -24,7 +24,7 @@ def parse_args():
 
     # 基础输入参数
     parser.add_argument('--img_dir', type=str,
-                        default='./data/eval',
+                        default='./eval',
                         help='Dir of the input images')
 
     # PoseExtractor 参数 (必填或提供默认路径)
@@ -40,7 +40,7 @@ def parse_args():
     parser.add_argument('--annotation_file', type=str,
                         default='./data/train_final.json',
                         help='Path to the annotation file (optional)')
-    parser.add_argument('--output_dir', default='./workdir4', type=str)
+    parser.add_argument('--output_dir', default='./workdir5', type=str)
 
     return parser.parse_args()
 
@@ -216,7 +216,7 @@ def predict(args, img_path, output_path, pose_extractor, reconstructor, geometri
         kpts_gen = pose_extractor.extract_31_keypoints(final_image_url)  # 重新检测生成图的关键点
         M_inv = get_final_calibration_matrix(kpts_orig, kpts_gen=kpts_gen, image_path=all_path[-1])  # 这里暂时传 None，后续可以改成实际生成图的关键点
 
-        _, mask_gen = sam2_predictor.get_mask_only(
+        mask_gen = sam2_predictor.get_mask_only(
             final_local_path,
             kpts_gen,
             types_orig
@@ -224,7 +224,7 @@ def predict(args, img_path, output_path, pose_extractor, reconstructor, geometri
 
         # 2. 提取 Orig Image 的 SAM2 Mask
         # (如果你前面已经切过了，可以直接用前面的变量。这里为了保险重新调一次 segment_subject2)
-        _, mask_orig = sam2_predictor.get_mask_only(
+        mask_orig = sam2_predictor.get_mask_only(
             img_path,
             kpts_orig,
             types_orig
@@ -554,23 +554,19 @@ def calculate_2d_mpjpe(pred_joints_3d, gt_kpts_orig, M_inv, global_cam, mapping_
 
     return float(np.mean(errors)) if errors else 0.0
 
+
 def get_final_calibration_matrix(kpts_orig, kpts_gen, image_path):
     """
-    量化测试专用版：自动剔除坏点，自适应平移计算，已修复置信度和容忍度问题
+    量化测试专用版：极致刚体对齐 (强制躯干主导，带安全兜底)
     """
-    img = cv2.imread(image_path)
-    current_img_w = img.shape[1]
-    current_img_h = img.shape[0]
-
-    # 1. 引入头部和躯干的全部强刚性特征点
-    candidate_indices = [i for i in range(17) if kpts_orig[i][2] > 0.3]
+    # 1. 定义最高优先级的核心躯干点：5(左肩), 6(右肩), 11(左胯), 12(右胯)
+    core_indices = [5, 6, 11, 12]
 
     valid_src = []
     valid_dst = []
 
-    # 🌟 修复 1：使用 [2] 获取置信度，阈值设为 0.3（MMPose标准）
-    for idx in candidate_indices:
-        # 取第3个元素(索引2)作为置信度，滤除大模型没画好或者原图被遮挡的点
+    # 提取核心点 (置信度需 > 0.3)
+    for idx in core_indices:
         if kpts_orig[idx][2] > 0.3 and kpts_gen[idx][2] > 0.3:
             valid_src.append(kpts_orig[idx, :2])
             valid_dst.append(kpts_gen[idx, :2])
@@ -578,23 +574,46 @@ def get_final_calibration_matrix(kpts_orig, kpts_gen, image_path):
     src = np.array(valid_src, dtype=np.float32)
     dst = np.array(valid_dst, dtype=np.float32)
 
-    if len(src) < 4:
-        raise ValueError("严重警告：有效对齐锚点不足 3 个，仿射矩阵计算失败，建议跳过该图像！")
+    # ========================================================
+    # 🌟 策略 A：如果核心点充足 (>=3)，使用极致刚体对齐
+    # ========================================================
+    if len(src) >= 3:
+        print("📐 [Calibration] 使用【核心躯干刚体】进行极致对齐 (method=0)")
+        M_calib, inliers = cv2.estimateAffinePartial2D(
+            src, dst,
+            method=0  # 🚨 强制最小二乘法，绝不抛弃这几个核心点
+        )
 
-    # 🌟 修复 2：将 RANSAC 阈值放宽到 20.0 像素，适应大模型的生成误差
-    M_calib, inliers = cv2.estimateAffinePartial2D(
-        src, dst,
-        method=cv2.RANSAC,
-        ransacReprojThreshold=20.0
-    )
+    # ========================================================
+    # ⚠️ 策略 B (兜底)：如果下半身被遮挡，退回不包含头部的全骨架 RANSAC 对齐
+    # ========================================================
+    else:
+        print("⚠️ [Calibration] 核心点被严重遮挡，退回【剔除头部】的全身体对齐方案...")
+        # 包含四肢：5 到 16 (坚决不要 0-4 的头部点)
+        fallback_indices = [i for i in range(5, 17)]
+        fb_src = []
+        fb_dst = []
+        for i in fallback_indices:
+            if kpts_orig[i][2] > 0.3 and kpts_gen[i][2] > 0.3:
+                fb_src.append(kpts_orig[i, :2])
+                fb_dst.append(kpts_gen[i, :2])
 
-    # 🌟 修复 3：兜底机制，防止 RANSAC 极低概率的求解失败返回 None
+        fb_src = np.array(fb_src, dtype=np.float32)
+        fb_dst = np.array(fb_dst, dtype=np.float32)
+
+        if len(fb_src) < 3:
+            raise ValueError("严重警告：有效对齐锚点不足 3 个，仿射矩阵计算失败！")
+
+        # 因为四肢游离性强，必须开启 RANSAC 剔除被大模型画飞的畸形手臂/腿
+        M_calib, inliers = cv2.estimateAffinePartial2D(
+            fb_src, fb_dst,
+            method=cv2.RANSAC,
+            ransacReprojThreshold=20.0
+        )
+
     if M_calib is None:
         raise ValueError("对齐完全失败！")
 
-    print(f"📐 [Calibration] Orig -> Gen 映射矩阵计算完成。")
-
-    # 🌟 关键修改：直接返回 2x3 矩阵，不要再乘 256 的缩放矩阵 S 了！
     return M_calib
 
 def save_image_from_url(urls, source, save_dir):
@@ -716,6 +735,7 @@ def main(args):
                 print(f"❌ 处理图片 {img_path.name} 时发生错误: {str(e)}")
                 with open(Path(args.output_dir) / "error_log.txt", "a") as f:
                     f.write(f"{img_path.name}: {str(e)}\n")
+                raise e
 
         # 循环结束后打印最终报告
     print("\n" + "=" * 30)
