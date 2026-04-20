@@ -849,7 +849,7 @@ class AgenticImageEditor:
             final_edit_prompt = plan_result["edit_prompt"] + "\n" + self.constraints
             print(f"🎯 [Underlying Edit Prompt]:\n{final_edit_prompt}\n")
             # 1. 执行编辑
-            new_generated_path = self.edit_image(current_image_path, final_edit_prompt, self.base_instruction, mask_url, i, save_dir)
+            new_generated_path = self.edit_image(current_image_path, final_edit_prompt, self.base_instruction, i, save_dir)
             if new_generated_path is None:
                 continue
 
