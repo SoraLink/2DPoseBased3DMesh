@@ -372,7 +372,8 @@ class GeometricRefinerAgent:
         # 精细微调的专用基础指令（强调用第二张图作为骨架参考）
         self.refine_instruction = """
         [Task: Geometric Limb Calibration]
-        Objective: adjust the posture of the newly generated limb in the main image to strictly match the provided reference skeleton image.
+        Objective: adjust the posture of the newly generated limb in the main image to strictly match the provided 
+        reference skeleton image. Finally, maintain the background as black and do not add any background.
 
         [Strict Rules]
         1. Look at the SECOND image (the skeleton graph). This is your exact target pose.
@@ -546,8 +547,10 @@ class AgenticImageEditor:
         self.eval_model = eval_model
         self.max_iterations = 3
         self.base_instruction = """
-        [Task: Semantic-Level Limb Completion]
-        Objective: Perform local inpainting and completion on the subject's missing limb parts to generate a person with four intact limbs. All four limbs including hands and feets must be clearly visible.
+        Objective: Perform local inpainting and completion on the subject's missing limb parts to generate a person with 
+        four intact limbs. This includes replacing any prosthetic limbs with normal limbs, and reasonably completing 
+        residual limbs if no prosthetics are present. All four limbs including hands and feet must be clearly visible. 
+        Finally, maintain the background as black and do not add any background.
         
         [Constraints]:
         1. It is strictly prohibited to alter the original torso, head, and any existing intact limbs. These parts must remain exactly as they are.
