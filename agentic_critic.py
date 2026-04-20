@@ -724,29 +724,59 @@ class AgenticImageEditor:
           extending from the stump. DO NOT include general scene descriptions 
           (e.g., do not describe the jersey, face, or background)."
         }}"""
-        # 调用视觉大模型
-        resp = MultiModalConversation.call(
-            model=self.eval_model,
-            messages=[{
-                "role": "user",
-                "content": [
-                    {"image": image_url},
-                    {"text": think_prompt}
-                ]
-            }],
-            temperature=0.1,
-            response_format={'type': 'json_object'}
-        )
 
-        content = resp.output.choices[0].message.content
-        if isinstance(content, list):
-            text_parts = [item['text'] for item in content if 'text' in item]
-            content = "".join(text_parts)
-        match = re.search(r'\{.*\}', content, re.DOTALL)
-        if match:
-            content = match.group(0)
+        # ==========================================
+        # 🚀 新增：最大重试 3 次的强健网络请求逻辑
+        # ==========================================
+        max_retries = 3
+        for attempt in range(max_retries):
+            try:
+                # 调用视觉大模型
+                resp = MultiModalConversation.call(
+                    model=self.eval_model,
+                    messages=[{
+                        "role": "user",
+                        "content": [
+                            {"image": image_url},
+                            {"text": think_prompt}
+                        ]
+                    }],
+                    temperature=0.1,
+                    response_format={'type': 'json_object'}
+                )
 
-        return json.loads(content)
+                # 1. 检查 API HTTP 状态码
+                if resp.status_code != 200:
+                    raise RuntimeError(f"API请求失败: HTTP {resp.status_code}, {resp.message}")
+
+                # 2. 提取文本内容
+                content = resp.output.choices[0].message.content
+                if isinstance(content, list):
+                    text_parts = [item['text'] for item in content if 'text' in item]
+                    content = "".join(text_parts)
+
+                # 3. 强力清洗：脱去大模型偶尔加上的 Markdown 外衣
+                content = content.replace("```json", "").replace("```", "").strip()
+
+                # 4. 正则提取 JSON
+                match = re.search(r'\{.*\}', content, re.DOTALL)
+                if not match:
+                    raise ValueError(f"未能从大模型输出中提取到有效的 JSON 对象。原始输出片段: {content[:100]}...")
+
+                json_str = match.group(0)
+
+                # 5. 尝试加载并返回
+                return json.loads(json_str)
+
+            except Exception as e:
+                print(f"⚠️ [Thinking Module] 第 {attempt + 1}/{max_retries} 次解析尝试失败: {str(e)}")
+                if attempt < max_retries - 1:
+                    print("🔄 等待 3 秒后重新规划...")
+                    time.sleep(3)  # 给 API 喘口气的时间
+                else:
+                    print("❌ [Thinking Module] 重试次数耗尽，无法生成有效的规划任务。")
+                    # 直接抛出异常，让最外层 (predict 函数的 retry) 去接管，或者做其他降级处理
+                    raise RuntimeError(f"Agent 思考与 JSON 解析彻底崩溃: {str(e)}")
 
     def evaluate_image(self, original_url, current_url, original_prompt):
         print(f"\n🔍 [评估] 调用 {self.eval_model} 进行视觉审视...")
