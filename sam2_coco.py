@@ -143,7 +143,7 @@ class SAM2Predictor:
 
     def segment_subject(self, image_path, output_path, keypoints, pad_ratio=0.3):
         """
-        SAM 2 图像分割与扩图函数 (防马赛克、高精度版)
+        SAM 2 图像分割与扩图函数 (防马赛克、高精度版) - 🌟 绿幕版
         """
 
         # 1. 提取有效关键点
@@ -187,18 +187,18 @@ class SAM2Predictor:
         _, mask_final = cv2.threshold(mask_blurred, 127, 255, cv2.THRESH_BINARY)
         mask_bool = (mask_final > 0)
 
-        # 6. 提取人物 (黑底)
-        image_subject_only = np.zeros_like(image_rgb)
+        # 6. 提取人物 (🌟 改为绿幕底)
+        image_subject_only = np.full_like(image_rgb, [0, 255, 0])
         image_subject_only[mask_bool] = image_rgb[mask_bool]
 
-        # 7. 扩图 (Padding)
+        # 7. 扩图 (Padding - 🌟 边缘也用绿色扩充)
         h, w = image.shape[:2]
         p_h, p_w = int(h * pad_ratio), int(w * pad_ratio)
         image_padded = cv2.copyMakeBorder(
             image_subject_only,
             p_h, p_h, p_w, p_w,
             cv2.BORDER_CONSTANT,
-            value=[0, 0, 0]
+            value=[0, 255, 0]  # 绿边
         )
 
         # 8. 保存高质量 JPG (100质量)
@@ -212,20 +212,17 @@ class SAM2Predictor:
         if is_success:
             im_buf_arr.tofile(output_path)
             print(f"✅ 成功提取主体并扩图: {output_path}")
-            # 🌟 根据你的要求：不在这里修改 keypoints，保持原始坐标系，交给下游校准器处理
             return output_path, mask_final
         else:
             raise ValueError("图像编码保存失败")
 
-
     def segment_subject2(self, image_path, output_dir, keypoints, types, pad_ratio=0.3):
         """
-        SAM 2 图像分割与扩图函数 (带关键点可视化)
+        SAM 2 图像分割与扩图函数 (带关键点可视化) - 🌟 绿幕版
         """
         # 1. 提取有效关键点
         points_coords = []
         input_labels = []
-        # 假设 read_kpts_annotation 返回的是 [N, 3] 的数组
         for i, pt in enumerate(keypoints):
             x, y, v = pt[0], pt[1], pt[2]
             if v > 0 and types[i] != 2:
@@ -234,7 +231,6 @@ class SAM2Predictor:
                     input_labels.append(1)
                 elif types[i] == 1:
                     input_labels.append(0)
-
 
         if not points_coords:
             print(f"⚠️ 跳过 {image_path}: 未找到有效可见点")
@@ -268,18 +264,18 @@ class SAM2Predictor:
         _, mask_final = cv2.threshold(mask_blurred, 127, 255, cv2.THRESH_BINARY)
         mask_bool = (mask_final > 0)
 
-        # 5. 提取人物 (黑底)
-        image_subject_only = np.full_like(image_rgb, 255)
+        # 5. 提取人物 (🌟 改为绿幕底)
+        image_subject_only = np.full_like(image_rgb, [0, 255, 0])
         image_subject_only[mask_bool] = image_rgb[mask_bool]
 
-        # 6. 扩图 (Padding)
+        # 6. 扩图 (Padding - 🌟 边缘也用绿色扩充)
         h, w = image.shape[:2]
         p_h, p_w = int(h * pad_ratio), int(w * pad_ratio)
         image_padded = cv2.copyMakeBorder(
             image_subject_only,
             p_h, p_h, p_w, p_w,
             cv2.BORDER_CONSTANT,
-            value=[0, 0, 0]
+            value=[0, 255, 0]  # 绿边
         )
 
         image_padded_bgr = cv2.cvtColor(image_padded, cv2.COLOR_RGB2BGR)
@@ -290,24 +286,18 @@ class SAM2Predictor:
         for i, pt in enumerate(keypoints):
             x, y, v = pt[0], pt[1], pt[2]
             pt_type = types[i]
-            # 只绘制置信度大于 0 (或你需要的阈值) 的点
             if v > 0:
-                # 核心：因为图像四周加了黑边，原本的坐标必须加上 offset
                 shifted_x = int(x + p_w)
                 shifted_y = int(y + p_h)
                 if pt_type == 0:
-                    inner_color = (0, 255, 0)  # 绿色：正样本 (SAM Label = 1)
+                    inner_color = (0, 255, 0)
                 elif pt_type == 1:
-                    inner_color = (0, 0, 255)  # 红色：负样本 (SAM Label = 0)
+                    inner_color = (0, 0, 255)
                 else:
-                    inner_color = (255, 0, 0)  # 蓝色：忽略点或其他 (types == 2)
+                    inner_color = (255, 0, 0)
 
-                # 画一个带白边的绿色实心圆，方便在黑底和人物衣服上都能看清
                 cv2.circle(image_padded_bgr, (shifted_x, shifted_y), radius=6, color=(255, 255, 255), thickness=2)
-                # 画实心内圆
                 cv2.circle(image_padded_bgr, (shifted_x, shifted_y), radius=4, color=inner_color, thickness=-1)
-                # 可选：如果想标出关键点的 ID，可以解开下面这行的注释
-                # cv2.putText(image_padded_bgr, str(i), (shifted_x + 5, shifted_y - 5), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 255), 1)
         # =======================================================
 
         # 7. 保存高质量 JPG 到对应子文件夹

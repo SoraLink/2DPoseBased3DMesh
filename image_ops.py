@@ -71,7 +71,7 @@ class ImageProcessor:
 
         # 3. 强制黑底 (Mask 为 0 的地方全部赋值为 [0, 0, 0])
         # 注意：mask 是 255 (前景) 和 0 (背景)
-        img_bgr[mask < 127] = [0, 0, 0]
+        img_bgr[mask < 127] = [0, 255, 0]
 
         # 4. 构建新的保存路径 (image name + _black_bg)
         dirname = os.path.dirname(image_path)
