@@ -75,14 +75,13 @@ class SAM2Predictor:
             masks, scores, logits = self.predictor.predict(
                 point_coords=input_points,
                 point_labels=input_labels,
-                multimask_output=True
+                multimask_output=False  # 🚨 核心改动 1：关闭多余输出，让模型只给一个最确定的答案
             )
 
-        areas = np.sum(masks, axis=(1, 2))
-        largest_idx = np.argmax(areas)
+        # 🚨 核心改动 2：彻底删掉 areas 和 argmax()，直接取第 0 个 Mask
+        mask_raw = (masks[0] * 255).astype(np.uint8)
 
         # 4. 形态学后处理
-        mask_raw = (masks[largest_idx] * 255).astype(np.uint8)
         kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (5, 5))
         mask_closed = cv2.morphologyEx(mask_raw, cv2.MORPH_CLOSE, kernel, iterations=2)
 
@@ -92,6 +91,55 @@ class SAM2Predictor:
         # 直接返回干净的 Mask，打完收工！
         return mask_final
 
+    def get_solid_mask(self, image_path, keypoints, types):
+        """
+        专职洗图工具：强制单通道输出版 SAM2 推理。
+        关闭了 multimask_output，确保返回的一定是包裹所有正向关键点的主体人物，彻底杜绝背景反转。
+        """
+        # 1. 提取有效关键点
+        points_coords = []
+        input_labels = []
+        for i, pt in enumerate(keypoints):
+            x, y, v = pt[0], pt[1], pt[2]
+            if v > 0 and types[i] != 2:
+                points_coords.append([x, y])
+                if types[i] == 0:
+                    input_labels.append(1)
+                elif types[i] == 1:
+                    input_labels.append(0)
+
+        if not points_coords:
+            print(f"⚠️ 跳过 {image_path}: 未找到有效可见点")
+            return None
+
+        input_points = np.array(points_coords)
+        input_labels = np.array(input_labels)
+
+        # 2. 读取图片
+        image_data = np.fromfile(image_path, dtype=np.uint8)
+        image = cv2.imdecode(image_data, cv2.IMREAD_COLOR)
+        if image is None:
+            raise FileNotFoundError(f"无法读取图片: {image_path}")
+        image_rgb = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
+
+        # 3. 生成 Mask (🚨 核心修改：专门为此场景强制设为 False)
+        with torch.inference_mode(), torch.autocast("cuda", dtype=torch.bfloat16):
+            self.predictor.set_image(image_rgb)
+            masks, scores, logits = self.predictor.predict(
+                point_coords=input_points,
+                point_labels=input_labels,
+                multimask_output=False  # 绝不盲猜面积，只要主体
+            )
+
+        # 4. 形态学后处理
+        mask_raw = (masks[0] * 255).astype(np.uint8)
+        kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (5, 5))
+        mask_closed = cv2.morphologyEx(mask_raw, cv2.MORPH_CLOSE, kernel, iterations=2)
+
+        mask_blurred = cv2.GaussianBlur(mask_closed, (3, 3), 0)
+        _, mask_final = cv2.threshold(mask_blurred, 127, 255, cv2.THRESH_BINARY)
+
+        return mask_final
 
     def segment_subject(self, image_path, output_path, keypoints, pad_ratio=0.3):
         """
@@ -209,14 +257,10 @@ class SAM2Predictor:
             masks, scores, logits = self.predictor.predict(
                 point_coords=input_points,
                 point_labels=input_labels,
-                multimask_output=True
+                multimask_output=False
             )
 
-        areas = np.sum(masks, axis=(1, 2))
-        largest_idx = np.argmax(areas)
-
-        # 强制使用最大的 Mask
-        mask_raw = (masks[largest_idx] * 255).astype(np.uint8)
+        mask_raw = (masks[0] * 255).astype(np.uint8)
         kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (5, 5))
         mask_closed = cv2.morphologyEx(mask_raw, cv2.MORPH_CLOSE, kernel, iterations=2)
 

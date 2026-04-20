@@ -56,7 +56,7 @@ class ImageProcessor:
         print("🧹 [洗图] 正在清除大模型产生的背景噪声...")
 
         # 1. 重新提取当前图的 Mask
-        mask = sam2_predictor.get_mask_only(
+        mask = sam2_predictor.get_solid_mask(
             image_path,
             kpts_gen,
             types_orig
