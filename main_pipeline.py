@@ -215,6 +215,32 @@ def predict(args, img_path, output_path, pose_extractor, reconstructor, geometri
         cut_tasks = []
         kpts_gen = pose_extractor.extract_31_keypoints(final_image_url)  # 重新检测生成图的关键点
         M_inv = get_final_calibration_matrix(kpts_orig, kpts_gen=kpts_gen, image_path=all_path[-1])  # 这里暂时传 None，后续可以改成实际生成图的关键点
+
+        _, mask_gen = sam2_predictor.get_mask_only(
+            final_local_path,
+            kpts_gen,
+            types_orig
+        )
+
+        # 2. 提取 Orig Image 的 SAM2 Mask
+        # (如果你前面已经切过了，可以直接用前面的变量。这里为了保险重新调一次 segment_subject2)
+        _, mask_orig = sam2_predictor.get_mask_only(
+            img_path,
+            kpts_orig,
+            types_orig
+        )
+
+        # 3. 核心调用：生成叠加差异图
+        visualize_alignment_diff(
+            orig_img_path=img_path,
+            mask_orig=mask_orig,
+            mask_gen=mask_gen,
+            kpts_orig=kpts_orig,
+            kpts_gen=kpts_gen,
+            M_orig_to_gen=M_inv,  # get_final_calibration_matrix 返回的是 Orig->Gen
+            output_dir=output_path
+        )
+
         # 遍历 METAINFO 中的最后 8 个残肢点 (ID 23 到 30)
         for i in range(23, 31):
             # 判断: 只有 type == 0 才是有效残肢点，且确保坐标数组够长
@@ -281,10 +307,9 @@ def predict(args, img_path, output_path, pose_extractor, reconstructor, geometri
         print(f"6. 垂直方向偏差 (Offset Y): {offset_y:.2f} 像素 (正值代表投影偏高)")
         # ================= DEBUG BLOCK END =================
 
-        out_img_path, pred_mask = project_mesh_overlay(img_path, mesh, M_inv, global_cam, output_path)  # 将最终 Mesh 投影回原图坐标系，生成 Overlay
-        sam2_img_path, mask = sam2_predictor.segment_subject2(img_path, output_path, kpts, types_orig)
-
-        miou_score = calculate_miou(pred_mask, mask)
+        orig_proj_path, pred_mask_orig, gen_proj_path, pred_mask_gen = project_mesh_overlay(img_path, all_path[-1], mesh, M_inv, global_cam, output_path)  # 将最终 Mesh 投影回原图坐标系，生成 Overlay
+        sam2_img_path, mask_gt = sam2_predictor.segment_subject2(img_path, output_path, kpts, types_orig)
+        miou_score = calculate_miou(pred_mask_orig, mask_gt)
         print(f"📊 [量化评估] 掩码 mIoU 评分: {miou_score:.4f}")
 
         INTACT_MAPPING = {METAINFO['keypoint_info'][i]['name']: i for i in range(0, 17)}
@@ -312,9 +337,9 @@ def predict(args, img_path, output_path, pose_extractor, reconstructor, geometri
         raise e
 
 
-def project_mesh_overlay(image_path, mesh, M_inv, global_cam, output_dir):
+def project_mesh_overlay(image_path, gen_image_path, mesh, M_inv, global_cam, output_dir):
     """
-    通过将仿射变换集成进投影矩阵，实现 3D Mesh 到原图的精准投影
+    实现 3D Mesh 到 Gen 图和 Orig 图的双重精准投影
     """
     # 1. 提取生成图空间的相机内参
     f_gen = global_cam['focal']  # [fx, fy]
@@ -327,65 +352,159 @@ def project_mesh_overlay(image_path, mesh, M_inv, global_cam, output_dir):
         [0, 0, 1]
     ])
 
-    # 3. 将 2x3 的 M_inv (Orig -> Gen) 扩展为 3x3 齐次矩阵
-    M_orig_to_gen = np.vstack([M_inv, [0, 0, 1]])
-
-    # 4. 计算 Gen -> Orig 的变换 (3x3)
-    M_gen_to_orig = np.linalg.inv(M_orig_to_gen)
-
-    # 5. 核心：计算“原图相机投影矩阵”
-    # 原理：P_orig = M_gen_to_orig @ K_gen @ P_camera_space
-    # 这步合并了：投影到2D -> 仿射逆变换回原图
-    P_final = M_gen_to_orig @ K_gen
-
-    # 6. 读取原图
-    image_data = np.fromfile(image_path, dtype=np.uint8)
-    original_image = cv2.imdecode(image_data, cv2.IMREAD_COLOR)
-    h_orig, w_orig = original_image.shape[:2]
-
     vertices = mesh.vertices
-    # 批量进行矩阵运算，效率更高且更准
-    # 将 vertices 转为齐次坐标 (N, 3) -> (3, N)
-    pts_3d = vertices.T
-
-    # 投影： (3, 3) @ (3, N) = (3, N)
-    pts_2d_homo = P_final @ pts_3d
-
-    # 归一化 Z 轴 (w 坐标)
-    # 避免除以 0
-    zs = pts_2d_homo[2, :]
-    zs[zs < 1e-5] = 1e-5
-
-    u = pts_2d_homo[0, :] / zs
-    v = pts_2d_homo[1, :] / zs
-
-    projected_pts_orig = np.stack([u, v], axis=1).astype(np.int32)
-
-    # 7. 绘制 Mask
-    mask_orig = np.zeros((h_orig, w_orig), dtype=np.uint8)
+    pts_3d = vertices.T  # (3, N)
     valid_faces = mesh.faces.astype(np.int32)
 
-    # 过滤掉在相机背后的顶点面片
+    # ====================================================
+    # 🌟 新增逻辑：A. 将 Mesh 投影到 Gen 图 (直接使用 K_gen)
+    # ====================================================
+    pts_2d_homo_gen = K_gen @ pts_3d
+
+    zs_gen = pts_2d_homo_gen[2, :]
+    zs_gen[zs_gen < 1e-5] = 1e-5
+
+    u_gen = pts_2d_homo_gen[0, :] / zs_gen
+    v_gen = pts_2d_homo_gen[1, :] / zs_gen
+    projected_pts_gen = np.stack([u_gen, v_gen], axis=1).astype(np.int32)
+
+    # 读取 Gen 图
+    gen_image_data = np.fromfile(gen_image_path, dtype=np.uint8)
+    gen_image = cv2.imdecode(gen_image_data, cv2.IMREAD_COLOR)
+    h_gen, w_gen = gen_image.shape[:2]
+
+    mask_gen = np.zeros((h_gen, w_gen), dtype=np.uint8)
+
     for face in valid_faces:
-        if np.all(zs[face] > 0.1):  # 只画在相机前方的面
+        if np.all(zs_gen[face] > 0.1):
+            pts = projected_pts_gen[face].reshape((-1, 1, 2))
+            cv2.fillPoly(mask_gen, [pts], 255)
+
+    overlay_color_gen = np.zeros_like(gen_image)
+    overlay_color_gen[:] = [0, 255, 0]
+    mask_bool_gen = (mask_gen > 127)
+    output_image_gen = gen_image.copy()
+    output_image_gen = cv2.addWeighted(overlay_color_gen, 0.5, output_image_gen, 0.5, 0)
+    output_image_gen[~mask_bool_gen] = gen_image[~mask_bool_gen]
+
+    gen_out_name = os.path.basename(gen_image_path).replace(".jpg", "_gen_projection.jpg")
+    gen_out_path = os.path.join(output_dir, gen_out_name)
+    cv2.imencode(".jpg", output_image_gen)[1].tofile(gen_out_path)
+
+
+    # ====================================================
+    # 原有逻辑：B. 将 Mesh 投影回 Orig 原图 (使用仿射逆变换)
+    # ====================================================
+    # 3. 将 2x3 的 M_inv (Orig -> Gen) 扩展为 3x3 齐次矩阵并求逆
+    M_orig_to_gen = np.vstack([M_inv, [0, 0, 1]])
+    M_gen_to_orig = np.linalg.inv(M_orig_to_gen)
+
+    # 4. 合并变换：投影到 Gen 平面 -> 仿射变换回 Orig 平面
+    P_final = M_gen_to_orig @ K_gen
+
+    # 5. 计算 Orig 投影坐标
+    pts_2d_homo_orig = P_final @ pts_3d
+
+    zs_orig = pts_2d_homo_orig[2, :]
+    zs_orig[zs_orig < 1e-5] = 1e-5
+
+    u_orig = pts_2d_homo_orig[0, :] / zs_orig
+    v_orig = pts_2d_homo_orig[1, :] / zs_orig
+    projected_pts_orig = np.stack([u_orig, v_orig], axis=1).astype(np.int32)
+
+    # 读取 Orig 原图
+    orig_image_data = np.fromfile(image_path, dtype=np.uint8)
+    original_image = cv2.imdecode(orig_image_data, cv2.IMREAD_COLOR)
+    h_orig, w_orig = original_image.shape[:2]
+
+    mask_orig = np.zeros((h_orig, w_orig), dtype=np.uint8)
+
+    for face in valid_faces:
+        if np.all(zs_orig[face] > 0.1):
             pts = projected_pts_orig[face].reshape((-1, 1, 2))
             cv2.fillPoly(mask_orig, [pts], 255)
 
-    # 8. 混合叠加
-    overlay_color = np.zeros_like(original_image)
-    overlay_color[:] = [0, 255, 0]  # 绿色 Mask
+    overlay_color_orig = np.zeros_like(original_image)
+    overlay_color_orig[:] = [0, 255, 0]
+    mask_bool_orig = (mask_orig > 127)
+    output_image_orig = original_image.copy()
+    output_image_orig = cv2.addWeighted(overlay_color_orig, 0.5, output_image_orig, 0.5, 0)
+    output_image_orig[~mask_bool_orig] = original_image[~mask_bool_orig]
 
-    mask_bool = (mask_orig > 127)
-    output_image = original_image.copy()
-    output_image = cv2.addWeighted(overlay_color, 0.5, output_image, 0.5, 0)
-    output_image[~mask_bool] = original_image[~mask_bool]
+    orig_out_name = os.path.basename(image_path).replace(".jpg", "_orig_projection.jpg")
+    orig_out_path = os.path.join(output_dir, orig_out_name)
+    cv2.imencode(".jpg", output_image_orig)[1].tofile(orig_out_path)
 
-    # 保存
-    image_name = os.path.basename(image_path).replace(".jpg", "_projection.jpg")
-    output_path = os.path.join(output_dir, image_name)
-    cv2.imencode(".jpg", output_image)[1].tofile(output_path)
+    # 返回两个图的路径和 Mask，方便后续计算 mIoU
+    return orig_out_path, mask_orig, gen_out_path, mask_gen
 
-    return output_path, mask_orig
+
+def visualize_alignment_diff(orig_img_path, mask_orig, mask_gen, kpts_orig, kpts_gen, M_orig_to_gen, output_dir):
+    """
+    可视化原图与生成图的分割 Mask 和 Keypoints 之间的绝对形变差异
+    """
+    if mask_orig is None or mask_gen is None:
+        print("⚠️ 警告: 缺少 Mask，跳过形变差异可视化。")
+        return None
+
+    # 1. 读取原图作为底板
+    orig_img_data = np.fromfile(orig_img_path, dtype=np.uint8)
+    orig_img = cv2.imdecode(orig_img_data, cv2.IMREAD_COLOR)
+    h_orig, w_orig = orig_img.shape[:2]
+
+    # 2. 将 M_orig_to_gen (2x3) 转换为 M_gen_to_orig (2x3)
+    M_aug = np.vstack([M_orig_to_gen, [0, 0, 1]])
+    M_gen_to_orig = np.linalg.inv(M_aug)[:2, :]
+
+    # 3. 将 Gen 的 Mask 仿射变换回 Orig 坐标系
+    # 注意：mask_gen 是在 Gen 图上切出来的，我们需要把它拉平回原图的视角
+    mask_gen_aligned = cv2.warpAffine(mask_gen, M_gen_to_orig, (w_orig, h_orig), flags=cv2.INTER_NEAREST)
+
+    # 4. 绘制 Mask 叠加层
+    mask_overlay = np.zeros_like(orig_img)
+    mask_overlay[mask_orig > 127] = [0, 255, 0]  # 🟢 绿色：原图真实轮廓
+    mask_overlay[mask_gen_aligned > 127] = [0, 0, 255]  # 🔴 红色：生成图变形后的轮廓
+
+    # 计算重叠部分变为黄色 (Green + Red = Yellow)
+    overlap = (mask_orig > 127) & (mask_gen_aligned > 127)
+    mask_overlay[overlap] = [0, 255, 255]  # 🟡 黄色：完美对齐的区域
+
+    # 将 Mask 半透明叠加到底板上
+    alpha = 0.5
+    comp_img = cv2.addWeighted(mask_overlay, alpha, orig_img, 1 - alpha, 0)
+
+    # 5. 绘制 Keypoints 和形变向量 (拉扯线)
+    for i in range(len(kpts_orig)):
+        v_orig = kpts_orig[i][2] if len(kpts_orig[i]) > 2 else 1
+        v_gen = kpts_gen[i][2] if len(kpts_gen[i]) > 2 else 1
+
+        # 只对比两边都可见(>0.3)的有效关键点
+        if v_orig > 0.3 and v_gen > 0.3:
+            pt_orig = (int(kpts_orig[i][0]), int(kpts_orig[i][1]))
+
+            # 将 Gen 关键点变换回 Orig 坐标系
+            pt_gen_homo = np.array([kpts_gen[i][0], kpts_gen[i][1], 1.0])
+            pt_gen_aligned = M_gen_to_orig @ pt_gen_homo
+            pt_gen_aligned = (int(pt_gen_aligned[0]), int(pt_gen_aligned[1]))
+
+            # 连线：黄色形变向量 (可以看出大模型把这个关节往哪边拉扯了)
+            cv2.line(comp_img, pt_orig, pt_gen_aligned, (0, 255, 255), 2)
+
+            # 画点：绿点(Orig) vs 红点(Gen)
+            cv2.circle(comp_img, pt_orig, 5, (0, 255, 0), -1)
+            cv2.circle(comp_img, pt_gen_aligned, 4, (0, 0, 255), -1)
+
+    # 添加图例文字
+    cv2.putText(comp_img, "Green: Orig  Red: Gen  Yellow: Overlap", (20, 40),
+                cv2.FONT_HERSHEY_SIMPLEX, 1, (255, 255, 255), 2)
+
+    # 6. 保存图片
+    image_name = os.path.basename(orig_img_path).replace(".jpg", "_alignment_diff.jpg")
+    save_path = os.path.join(output_dir, image_name)
+    cv2.imencode(".jpg", comp_img)[1].tofile(save_path)
+    print(f"👁️ [形变评估] 差异对比图已保存: {save_path}")
+
+    return save_path
 
 def calculate_miou(pred_mask, gt_mask):
     """
@@ -459,7 +578,7 @@ def get_final_calibration_matrix(kpts_orig, kpts_gen, image_path):
     src = np.array(valid_src, dtype=np.float32)
     dst = np.array(valid_dst, dtype=np.float32)
 
-    if len(src) < 3:
+    if len(src) < 4:
         raise ValueError("严重警告：有效对齐锚点不足 3 个，仿射矩阵计算失败，建议跳过该图像！")
 
     # 🌟 修复 2：将 RANSAC 阈值放宽到 20.0 像素，适应大模型的生成误差
@@ -471,9 +590,7 @@ def get_final_calibration_matrix(kpts_orig, kpts_gen, image_path):
 
     # 🌟 修复 3：兜底机制，防止 RANSAC 极低概率的求解失败返回 None
     if M_calib is None:
-        M_calib, _ = cv2.estimateAffinePartial2D(src, dst)
-        if M_calib is None:
-            raise ValueError("对齐完全失败！")
+        raise ValueError("对齐完全失败！")
 
     print(f"📐 [Calibration] Orig -> Gen 映射矩阵计算完成。")
 

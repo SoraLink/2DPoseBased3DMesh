@@ -38,6 +38,60 @@ class SAM2Predictor:
             ax.scatter(pos_points[:, 0], pos_points[:, 1], color='green', marker='*', s=marker_size, edgecolor='white',
                        linewidth=1.25)
 
+    def get_mask_only(self, image_path, keypoints, types):
+        """
+        纯净版 SAM2 推理：只返回 Mask，不进行扩图、不画点、不保存图片。
+        专门用于获取生成图 (Gen Image) 的纯粹蒙版。
+        """
+        # 1. 提取有效关键点
+        points_coords = []
+        input_labels = []
+        for i, pt in enumerate(keypoints):
+            x, y, v = pt[0], pt[1], pt[2]
+            if v > 0 and types[i] != 2:
+                points_coords.append([x, y])
+                if types[i] == 0:
+                    input_labels.append(1)
+                elif types[i] == 1:
+                    input_labels.append(0)
+
+        if not points_coords:
+            print(f"⚠️ 跳过 {image_path}: 未找到有效可见点")
+            return None
+
+        input_points = np.array(points_coords)
+        input_labels = np.array(input_labels)
+
+        # 2. 读取图片
+        image_data = np.fromfile(image_path, dtype=np.uint8)
+        image = cv2.imdecode(image_data, cv2.IMREAD_COLOR)
+        if image is None:
+            raise FileNotFoundError(f"无法读取图片: {image_path}")
+        image_rgb = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
+
+        # 3. 生成 Mask
+        with torch.inference_mode(), torch.autocast("cuda", dtype=torch.bfloat16):
+            self.predictor.set_image(image_rgb)
+            masks, scores, logits = self.predictor.predict(
+                point_coords=input_points,
+                point_labels=input_labels,
+                multimask_output=True
+            )
+
+        areas = np.sum(masks, axis=(1, 2))
+        largest_idx = np.argmax(areas)
+
+        # 4. 形态学后处理
+        mask_raw = (masks[largest_idx] * 255).astype(np.uint8)
+        kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (5, 5))
+        mask_closed = cv2.morphologyEx(mask_raw, cv2.MORPH_CLOSE, kernel, iterations=2)
+
+        mask_blurred = cv2.GaussianBlur(mask_closed, (3, 3), 0)
+        _, mask_final = cv2.threshold(mask_blurred, 127, 255, cv2.THRESH_BINARY)
+
+        # 直接返回干净的 Mask，打完收工！
+        return mask_final
+
 
     def segment_subject(self, image_path, output_path, keypoints, pad_ratio=0.3):
         """

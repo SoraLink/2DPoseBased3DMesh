@@ -270,13 +270,18 @@ class PoseGeometricEvaluator:
         """
         # 1. 提取稳定的参考点 (例如躯干)，只拿前两维 (x, y) 坐标
         # 假设 kpts_orig 和 kpts_gen 都是 (N, 3) 的 numpy 数组
-        torso_indices = list(torso_indices.values())
-        src_pts = kpts_gen[torso_indices][:, :2].astype(np.float32)
-        dst_pts = kpts_orig[torso_indices][:, :2].astype(np.float32)
+        candidate_indices = [i for i in range(17) if kpts_orig[i][2] > 0.3]
+        src_pts = kpts_gen[candidate_indices][:, :2].astype(np.float32)
+        dst_pts = kpts_orig[candidate_indices][:, :2].astype(np.float32)
 
         # 2. 计算变换矩阵 (2x3 矩阵)
         # estimateAffinePartial2D 会返回最优的 [旋转+缩放 | 平移] 矩阵
-        transform_matrix, inliers = cv2.estimateAffinePartial2D(src_pts, dst_pts)
+        transform_matrix, inliers = cv2.estimateAffinePartial2D(
+            src_pts,
+            dst_pts,
+            method=cv2.RANSAC,
+            ransacReprojThreshold=20.0
+        )
 
         if transform_matrix is None:
             print("⚠️ 警告: 无法计算仿射变换矩阵，退回简单的中心点平移。")
