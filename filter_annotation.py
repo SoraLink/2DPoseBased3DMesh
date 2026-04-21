@@ -1,4 +1,5 @@
 import json
+import shutil
 import numpy as np
 from PIL import Image
 from pathlib import Path
@@ -36,11 +37,15 @@ def check_person_match(image_path: Union[str, Path], keypoints: Union[List, np.n
             if mask[y, x]:
                 valid_count += 1
 
-    print(f"[{Path(image_path).name}] 匹配点数: {valid_count}/{len(keypoints)}")
+    # 这里可以保留打印，或者注释掉以免刷屏
+    # print(f"[{Path(image_path).name}] 匹配点数: {valid_count}/{len(keypoints)}")
     return valid_count >= threshold
 
 
-def filter_coco_annotations(image_dir: Path, annotation_path: Path, output_path: Path):
+def filter_coco_annotations(image_dir: Path, annotation_path: Path, output_path: Path, failed_dir: Path):
+    # 确保失败文件夹存在
+    failed_dir.mkdir(parents=True, exist_ok=True)
+
     # 1. 加载 COCO 数据
     print(f"正在加载标注文件: {annotation_path}...")
     with open(annotation_path, 'r') as f:
@@ -60,34 +65,31 @@ def filter_coco_annotations(image_dir: Path, annotation_path: Path, output_path:
 
     # 2. 遍历分割后的图片目录
     image_files = list(image_dir.glob("*.png"))
-    print(f"找到 {len(image_files)} 张分割图片，开始严格匹配...")
+    print(f"找到 {len(image_files)} 张分割图片，开始严格匹配与筛查...")
 
     for image_path in image_files:
-        # 使用 pathlib 直接将后缀替换为 .jpg
         expected_jpg_name = image_path.with_suffix('.jpg').name
-
         target_img_info = None
 
-        # 1. 优先精确匹配 .jpg 的文件名 (速度最快)
+        # 匹配逻辑
         if expected_jpg_name in filename_to_img:
             target_img_info = filename_to_img[expected_jpg_name]
-        # 2. 防御性逻辑：万一 COCO 里面本身记录的就是 .png
         elif image_path.name in filename_to_img:
             target_img_info = filename_to_img[image_path.name]
-        # 3. 兜底逻辑：处理其他未知后缀（比如 .jpeg 或 .JPG）
         else:
             for coco_fn, info in filename_to_img.items():
                 if Path(coco_fn).stem == image_path.stem:
                     target_img_info = info
                     break
 
+        # 校验 1：数据缺失
         if target_img_info is None:
-            raise ValueError(f"数据缺失: 在 COCO 标注中完全找不到图片 {image_path.name} (或对应的jpg) 的记录！")
+            print(f"[移除] 数据缺失: 在标注中找不到图片 {image_path.name}")
+            shutil.move(str(image_path), str(failed_dir / image_path.name))
+            continue
 
         image_id = target_img_info['id']
         anns = img_id_to_anns.get(image_id, [])
-
-        # 临时存储当前图片匹配成功的标注
         matched_anns_for_this_image = []
 
         for ann in anns:
@@ -98,21 +100,25 @@ def filter_coco_annotations(image_dir: Path, annotation_path: Path, output_path:
             if check_person_match(image_path, kpts, threshold=9):
                 matched_anns_for_this_image.append(ann)
 
-        # ==========================================
-        # 严格校验匹配数量
-        # ==========================================
         match_count = len(matched_anns_for_this_image)
 
+        # 校验 2 & 3：匹配数量异常 (0个或多个)
         if match_count == 0:
-            raise ValueError(f"匹配失败 [0个匹配]: 分割图 {image_path.name} 上的有效关键点少于阈值，未能对应任何标注！")
+            print(f"[移除] 匹配失败: {image_path.name} 上的有效关键点少于阈值(0个匹配)")
+            shutil.move(str(image_path), str(failed_dir / image_path.name))
+            continue
         elif match_count > 1:
-            raise ValueError(
-                f"匹配异常 [多个匹配]: 分割图 {image_path.name} 错误地同时包含了 {match_count} 个人物的关键点！")
+            print(f"[移除] 匹配异常: {image_path.name} 同时包含了 {match_count} 个人物(多个匹配)")
+            shutil.move(str(image_path), str(failed_dir / image_path.name))
+            continue
 
-        assert 0 in matched_anns_for_this_image[0]['keypoint_types'][
-            23:31], f"错误: {image_path.name} 索引 23 到 30 之间没有包含 0"
+        # 校验 4：Keypoint Types 异常
+        if 0 not in matched_anns_for_this_image[0]['keypoint_types'][23:31]:
+            print(f"[移除] 类型异常: {image_path.name} 索引 23 到 30 之间没有包含 0")
+            shutil.move(str(image_path), str(failed_dir / image_path.name))
+            continue
 
-        # 走到这里，说明 match_count == 1，符合绝对预期
+        # 走到这里，说明所有校验通过，图片完美符合要求
         new_annotations.append(matched_anns_for_this_image[0])
         new_images.append(target_img_info)
 
@@ -128,10 +134,12 @@ def filter_coco_annotations(image_dir: Path, annotation_path: Path, output_path:
     with open(output_path, 'w') as f:
         json.dump(new_coco, f, indent=4)
 
-    print(f"\n✅ 筛选与严格校验通过！")
-    print(f"原始图片数: {len(coco_data['images'])} -> 筛选后: {len(new_images)}")
-    print(f"原始标注数: {len(coco_data['annotations'])} -> 筛选后: {len(new_annotations)}")
-    print(f"纯净的标注文件已保存至: {output_path}")
+    print(f"\n✅ 筛选完成！")
+    print(f"总计检查图片: {len(image_files)}")
+    print(f"成功筛选保留: {len(new_images)}")
+    print(f"失败并被移走: {len(image_files) - len(new_images)}")
+    print(f"纯净标注文件已保存至: {output_path}")
+    print(f"异常图片已移动至: {failed_dir}")
 
 # ==========================================
 # 运行
@@ -143,8 +151,10 @@ if __name__ == "__main__":
 
     # 输出路径
     OUTPUT_ANN_PATH = Path('./data/filtered_annotations.json')
+    # 失败图片存放路径 (避免跟原目录冲突)
+    FAILED_IMAGE_DIR = Path('./data/invalid_image')
 
     if not SEG_IMAGE_DIR.exists():
         print(f"错误: 目录 {SEG_IMAGE_DIR} 不存在")
     else:
-        filter_coco_annotations(SEG_IMAGE_DIR, RAW_ANN_PATH, OUTPUT_ANN_PATH)
+        filter_coco_annotations(SEG_IMAGE_DIR, RAW_ANN_PATH, OUTPUT_ANN_PATH, FAILED_IMAGE_DIR)
