@@ -403,7 +403,7 @@ class GeometricRefinerAgent:
         # 精细微调的专用基础指令（强调用第二张图作为骨架参考）
         self.refine_instruction = """
         [Task: Geometric Limb Calibration]
-        Objective: adjust the posture of the newly generated limb in the main image to strictly match the provided 
+        Objective: adjust the posture of the newly generated limb in the first image to strictly match the provided 
         reference skeleton image. Finally, replace the green with a realistic and suitable background.
 
         [Strict Rules]
@@ -593,27 +593,19 @@ class AgenticImageEditor:
         self.max_iterations = 3
         self.base_instruction = """
         Objective: Perform local inpainting and completion on the subject's missing limb parts to generate a person with 
-        four intact limbs. This includes replacing any prosthetic limbs with normal limbs, and reasonably completing 
-        residual limbs if no prosthetics are present. All four limbs including hands and feet must be clearly visible. 
-        Finally, replace the background with a realistic and suitable background.
+        four intact limbs. This includes replacing any prosthetic limbs with normal limbs, or reasonably completing 
+        residual limbs if no prosthetics are present. The generated limbs need to be visible in the image. 
+        Finally, change the background color to white.
         
         [Constraints]:
-        1. It is strictly prohibited to alter the original torso, head, and any existing intact limbs. These parts must remain exactly as they are.
-        2. When generating the missing limbs, you must strictly follow the direction of the existing stump. Do not cause any joint angles to change after the completion.
-        3. The entire person must be completely within the image; no part of the body should fall outside the frame.
-        
-        [Allowed Actions]
-        1. Change the background
+        Do not change the pose of the human subject. For example do not change the human torso, head, and any existing intact limbs. 
+        These parts must remain exactly as they are.
         """
 
         self.constraints = """
         [Constraints]:
-        1. It is strictly prohibited to alter the original torso, head, and any existing intact limbs. These parts must remain exactly as they are.
-        2. When generating the missing limbs, you must strictly follow the direction of the existing stump. Do not cause any joint angles to change after the completion.
-        3. The entire person must be completely within the image; no part of the body should fall outside the frame.
-        
-        [Allowed Actions]
-        1. Change the background
+        Do not change the pose of the human subject. For example do not change the human torso, head, and any existing intact limbs. 
+        These parts must remain exactly as they are.
         """
 
     def edit_image(self, image_path, action_prompt, base_instruction, iter, save_dir, mask_url=None):
