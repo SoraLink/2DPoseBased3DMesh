@@ -28,7 +28,7 @@ def generate_inpaint_mask(image_shape, keypoints, keypoint_types, bbox):
     生成用于 Inpainting 的 Mask
     :param image_shape: (height, width)
     :param keypoints: 扁平化的关键点列表 [x1,y1,v1, x2,y2,v2...]
-    :param keypoint_types: 标注类型列表，1 表示假肢，0 表示正常/残肢
+    :param keypoint_types: 标注类型列表，1 表示假肢，0 表示正常/残肢，2 表示忽略
     :param bbox: [x, y, width, height] 用于动态计算肢体粗细
     :return: Numpy 数组的 Mask (0为背景，255为需要Inpaint的区域)
     """
@@ -39,18 +39,19 @@ def generate_inpaint_mask(image_shape, keypoints, keypoint_types, bbox):
     # 格式化 kpts
     kpts = np.array(keypoints).reshape(-1, 3)
 
-    # 动态计算肢体宽度基准 (按 Bounding Box 最大边的 8% 估算，可根据实际效果微调)
+    # 动态计算肢体宽度基准
     box_w, box_h = bbox[2], bbox[3]
     limb_width = int(max(box_w, box_h) * 0.08)
-    # 确保宽度至少有几个像素，避免太细
     limb_width = max(limb_width, 10)
 
     # 遍历所有可能的残肢点
     for res_idx, info in RESIDUAL_KINEMATICS.items():
         rx, ry, rv = kpts[res_idx]
 
-        # 如果该残肢点不存在/不可见，跳过
-        if rv == 0:
+        # ==========================================
+        # [修改 1]：如果残肢点本身不可见，或者 type 为 2 (忽略)，直接跳过不画
+        # ==========================================
+        if rv == 0 or keypoint_types[res_idx] == 2:
             continue
 
         rx, ry = int(rx), int(ry)
@@ -59,33 +60,30 @@ def generate_inpaint_mask(image_shape, keypoints, keypoint_types, bbox):
         prosthetic_points = []
         for down_idx in info['downstream']:
             dx, dy, dv = kpts[down_idx]
-            # 如果点存在 且 类型是假肢 (1)
+            # 这里原本的逻辑是严格等于 1 (假肢) 才画，所以 type 为 2 的天然就被挡在外面了
             if dv > 0 and keypoint_types[down_idx] == 1:
                 prosthetic_points.append((int(dx), int(dy)))
 
-        # ==========================================
         # 逻辑分支 1：存在假肢
-        # ==========================================
         if len(prosthetic_points) > 0:
-            # 路线：从残肢点开始，连接所有下游假肢点
             path_points = [(rx, ry)] + prosthetic_points
 
             for i in range(len(path_points) - 1):
                 p1, p2 = path_points[i], path_points[i + 1]
-                # 画粗线连接
                 cv2.line(mask, p1, p2, color=255, thickness=limb_width)
-                # 在关节点画圆，确保连接处圆滑（类似圆角线帽）
                 cv2.circle(mask, p1, limb_width // 2, 255, -1)
                 cv2.circle(mask, p2, limb_width // 2, 255, -1)
 
-        # ==========================================
         # 逻辑分支 2：没有假肢 (纯残肢肉包)
-        # ==========================================
         else:
             parent_idx = info['parent']
             px, py, pv = kpts[parent_idx]
 
-            if pv > 0:
+            # ==========================================
+            # [修改 2]：如果父节点可见，且 type 不为 2，才用它计算延伸方向！
+            # 之前那条长到天际的绿线，大概率是因为用了一个错误的 parent 坐标算向量
+            # ==========================================
+            if pv > 0 and keypoint_types[parent_idx] != 2:
                 # 获取从父节点指向残肢点的向量
                 vx, vy = rx - px, ry - py
                 length = np.sqrt(vx ** 2 + vy ** 2)
@@ -93,18 +91,16 @@ def generate_inpaint_mask(image_shape, keypoints, keypoint_types, bbox):
                 if length > 0:
                     # 向量归一化
                     vx, vy = vx / length, vy / length
-                    # 沿着方向向外延伸一个 limb_width 的距离
+                    # 沿着方向向外延伸
                     extend_x = int(rx + vx * limb_width)
                     extend_y = int(ry + vy * limb_width)
 
-                    # 画一条向外延伸的粗线（形似长条形肉包）
+                    # 画向外延伸的长条形肉包
                     cv2.line(mask, (rx, ry), (extend_x, extend_y), color=255, thickness=limb_width)
-                    # 两端画圆角
                     cv2.circle(mask, (rx, ry), limb_width // 2, 255, -1)
-                    cv2.circle(mask, (extend_x, extend_y), int(limb_width * 0.6), 255, -1)  # 顶端稍微膨胀一点
+                    cv2.circle(mask, (extend_x, extend_y), int(limb_width * 0.6), 255, -1)
             else:
-                # 兜底情况：如果连父节点(如肩膀/大腿根)都被遮挡没标注
-                # 就直接在残肢点画一个稍大的圆形肉包
+                # 兜底情况：父节点无效或是被标注为 2，不计算延伸，直接在残肢点原地画个肉包
                 cv2.circle(mask, (rx, ry), int(limb_width * 0.8), 255, -1)
 
     return mask
