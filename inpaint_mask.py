@@ -160,6 +160,6 @@ def process_masks(image_dir: Path, annotation_path: Path, output_mask_dir: Path)
 if __name__ == "__main__":
     process_masks(
         image_dir=Path('./data/eval_seg_padded'),
-        annotation_path=Path('./data/filtered_annotations_padded.json'),
+        annotation_path=Path('./data/filtered_annotations_padded_png.json'),
         output_mask_dir=Path('./data/inpaint_masks')
     )
