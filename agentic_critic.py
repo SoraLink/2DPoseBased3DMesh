@@ -404,12 +404,11 @@ class GeometricRefinerAgent:
         self.refine_instruction = """
         [Task: Geometric Limb Calibration]
         Objective: adjust the posture of the newly generated limb in the first image to strictly match the provided 
-        reference skeleton image. Finally, replace the green with a realistic and suitable background.
+        reference skeleton image. Finally, ensure image background color as white
 
         [Strict Rules]
         1. Look at the SECOND image (the skeleton graph). This is your exact target pose.
         2. Adjust the angles and positions of the generated limbs in the FIRST image to perfectly align with the skeleton lines.
-        3. Maintain photorealistic skin texture and clothing continuity.
         """
 
     def align_orig_to_gen(self, kpts_orig, kpts_gen, torso_indices):
