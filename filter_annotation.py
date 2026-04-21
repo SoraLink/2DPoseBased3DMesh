@@ -63,12 +63,18 @@ def filter_coco_annotations(image_dir: Path, annotation_path: Path, output_path:
     print(f"找到 {len(image_files)} 张分割图片，开始严格匹配...")
 
     for image_path in image_files:
-        image_name = image_path.name
+        # 使用 pathlib 直接将后缀替换为 .jpg
+        expected_jpg_name = image_path.with_suffix('.jpg').name
 
-        # 匹配原始文件名或 stem
         target_img_info = None
-        if image_name in filename_to_img:
-            target_img_info = filename_to_img[image_name]
+
+        # 1. 优先精确匹配 .jpg 的文件名 (速度最快)
+        if expected_jpg_name in filename_to_img:
+            target_img_info = filename_to_img[expected_jpg_name]
+        # 2. 防御性逻辑：万一 COCO 里面本身记录的就是 .png
+        elif image_path.name in filename_to_img:
+            target_img_info = filename_to_img[image_path.name]
+        # 3. 兜底逻辑：处理其他未知后缀（比如 .jpeg 或 .JPG）
         else:
             for coco_fn, info in filename_to_img.items():
                 if Path(coco_fn).stem == image_path.stem:
@@ -76,8 +82,7 @@ def filter_coco_annotations(image_dir: Path, annotation_path: Path, output_path:
                     break
 
         if target_img_info is None:
-            # 如果连原图的信息都找不到，直接报错
-            raise ValueError(f"数据缺失: 在 COCO 标注中完全找不到图片 {image_name} 的记录！")
+            raise ValueError(f"数据缺失: 在 COCO 标注中完全找不到图片 {image_path.name} (或对应的jpg) 的记录！")
 
         image_id = target_img_info['id']
         anns = img_id_to_anns.get(image_id, [])
@@ -94,16 +99,18 @@ def filter_coco_annotations(image_dir: Path, annotation_path: Path, output_path:
                 matched_anns_for_this_image.append(ann)
 
         # ==========================================
-        # [新增] 严格校验匹配数量
+        # 严格校验匹配数量
         # ==========================================
         match_count = len(matched_anns_for_this_image)
 
         if match_count == 0:
-            raise ValueError(f"匹配失败 [0个匹配]: 分割图 {image_name} 上的有效关键点少于阈值，未能对应任何标注！")
+            raise ValueError(f"匹配失败 [0个匹配]: 分割图 {image_path.name} 上的有效关键点少于阈值，未能对应任何标注！")
         elif match_count > 1:
-            raise ValueError(f"匹配异常 [多个匹配]: 分割图 {image_name} 错误地同时包含了 {match_count} 个人物的关键点！")
+            raise ValueError(
+                f"匹配异常 [多个匹配]: 分割图 {image_path.name} 错误地同时包含了 {match_count} 个人物的关键点！")
 
-        assert 0 in matched_anns_for_this_image[0]['keypoint_types'][23:31]
+        assert 0 in matched_anns_for_this_image[0]['keypoint_types'][
+            23:31], f"错误: {image_path.name} 索引 23 到 30 之间没有包含 0"
 
         # 走到这里，说明 match_count == 1，符合绝对预期
         new_annotations.append(matched_anns_for_this_image[0])
