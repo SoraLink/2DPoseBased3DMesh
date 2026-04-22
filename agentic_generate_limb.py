@@ -136,7 +136,27 @@ class LimbCompositingAgent:
         print(f"🔪 启动骨架刻刀再植流水线 (Clean Logic)")
         print("=" * 50)
 
-        orig_bgr = cv2.imread(image_path)
+        img_with_alpha = cv2.imread(image_path, cv2.IMREAD_UNCHANGED)
+
+        if img_with_alpha is not None and img_with_alpha.shape[2] == 4:
+            # 分离通道
+            b, g, r, a = cv2.split(img_with_alpha)
+            # 创建纯白背景 (与原图等大)
+            white_bg = np.ones_like(img_with_alpha[:, :, :3]) * 255
+            # 将 alpha 归一化到 0-1
+            alpha_factor = a.astype(float) / 255.0
+            alpha_factor = cv2.merge([alpha_factor, alpha_factor, alpha_factor])
+            # 前景 (人)
+            foreground = cv2.merge([b, g, r]).astype(float)
+            # 背景 (白)
+            background = white_bg.astype(float)
+            # 线性插值合成: Final = Foreground * Alpha + Background * (1 - Alpha)
+            orig_bgr = cv2.add(cv2.multiply(foreground, alpha_factor),
+                               cv2.multiply(background, 1.0 - alpha_factor)).astype(np.uint8)
+        else:
+            # 如果没有 Alpha 通道或者是普通图片，直接读取 BGR
+            orig_bgr = cv2.imread(image_path)
+        # ----------------------------------------------
         keypoint_types = original_annotation.get("keypoint_types", [])
         kpts_orig = np.array(original_annotation["keypoints"]).reshape(-1, 3)
 
