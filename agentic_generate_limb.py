@@ -150,8 +150,8 @@ class LimbCompositingAgent:
         save_dir = os.path.join(base_output_dir, base_name)
         os.makedirs(save_dir, exist_ok=True)
 
-        gen_image_path = self.generate_full_image(image_path, save_dir)
-
+        # gen_image_path = self.generate_full_image(image_path, save_dir)
+        gen_image_path='./workdir1/bing_義足のランナー_6068/compositing_material_raw_gen.jpg'
         # 提取生成图关键点和 bbox
         kpts_gen = self.pose_extractor.extract_31_keypoints(gen_image_path)
         gen_bgr = cv2.imread(gen_image_path)
@@ -288,7 +288,7 @@ if __name__ == "__main__":
 
     # 4. 开始遍历本地文件夹里的图片
     for i, image_path in enumerate(image_dir.glob('*.png')):
-        if i > 1: break
+        if i > 0: break
         img_name = image_path.name  # 取纯文件名
 
         # 5. 精准匹配
