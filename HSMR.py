@@ -28,8 +28,7 @@ class ReconstructionEngine:
 
         # ⛩️ 3. 关键：直接从 pipeline 引用模型信息
         self.faces = self.pipeline.skel_model.skin_f.detach().cpu().numpy()
-        self.j_regressor = self.pipeline.skel_model.J_regressor.detach().cpu().numpy()
-
+        self.j_regressor = self.pipeline.skel_model.J_regressor.to_dense().detach().cpu().numpy()
         print(">>> ✅ 已通过 HSMR 内部 skel_model 获取 SMPL-X 拓扑，无需外部库。")
 
     @torch.no_grad()
@@ -75,7 +74,7 @@ class ReconstructionEngine:
         corrected_cam_t[2] = pd_cam_t[0, 2] * 256.0 / bbx_cs[2]
         # X, Y 位移修正 (5000 是官方焦距常数)
         corrected_cam_t[0] += (bbx_cs[0] - raw_cx) / 5000.0 * corrected_cam_t[2]
-        corrected_cam_t[1] += (bbx_cy - raw_cy) / 5000.0 * corrected_cam_t[2]
+        corrected_cam_t[1] += (bbx_cs[1] - raw_cy) / 5000.0 * corrected_cam_t[2]
 
         # 同步修正顶点位置，让它在全局坐标系下
         global_vertices = vertices + (corrected_cam_t.numpy() - pd_cam_t[0].numpy())
