@@ -437,7 +437,7 @@ def main(ori_image_path, gen_image_path,reconstructor, annotation_file):
 
             # 获取 2D 坐标 (假设 kpts_orig 的格式是 [x, y, conf])
             pt_2d_orig = kpts_orig[i][0:2]
-            pt_2d_orig_homo = np.array([pt_2d_orig[0], pt_2d_orig[1], 1.0])
+            pt_2d_orig_homo = np.array([pt_2d_orig[0], pt_2d_orig[1]])
             # 查表找到对应的 3D 骨骼起点和终点
             if res_name in RES_BONE_MAPPING:
                 start_joint_name, end_joint_name = RES_BONE_MAPPING[res_name]
