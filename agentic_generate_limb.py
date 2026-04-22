@@ -5,12 +5,15 @@ from pathlib import Path
 import cv2
 import time
 import numpy as np
+import torch
 from PIL import Image
 from dashscope import MultiModalConversation
 
 from image_ops import ImageProcessor
 from pose_extractor import PoseExtractor
 
+_original_load = torch.load
+torch.load = lambda *args, **kwargs: _original_load(*args, **kwargs, weights_only=False) if 'weights_only' not in kwargs else _original_load(*args, **kwargs)
 
 class LimbCompositingAgent:
     def __init__(self, pose_extractor, edit_model='qwen-image-2.0-pro'):
@@ -254,27 +257,40 @@ if __name__ == "__main__":
     )
     agent = LimbCompositingAgent(pose_extractor)
 
-    # 1. 在循环外，一次性读取整个 JSON 标注文件
+    # 1. 一次性读取 COCO 格式的 JSON
     annotation_path = Path('./data/train_final.json')
     with open(annotation_path, 'r', encoding='utf-8') as f:
-        dataset_annotations = json.load(f)
+        coco_data = json.load(f)
 
+    # 2. 解析 images 列表，建立 image_id -> file_name 的快速映射
+    image_id_to_name = {}
+    for img_info in coco_data.get('images', []):
+        # 假设 JSON 里存的是 "baidu_残疾人跑步_21.png" 或者带路径的相对地址
+        # 用 Path(xxx).name 只取纯文件名，方便后续和本地文件完美匹配
+        pure_name = Path(img_info['file_name']).name
+        image_id_to_name[img_info['id']] = pure_name
+
+    # 3. 解析 annotations 列表，建立 file_name -> annotation 的终极映射字典
     anno_dict = {}
-    for anno in dataset_annotations:
-        filename = anno['file_name']
-        anno_dict[filename] = anno
+    for anno in coco_data.get('annotations', []):
+        image_id = anno.get('image_id')
+        if image_id in image_id_to_name:
+            file_name = image_id_to_name[image_id]
+            # 假设每张图只有一个核心标注目标
+            # 注意：COCO 格式中关键点通常存在 anno['keypoints']，如果有你自定义的 'keypoint_types' 也会在这里面
+            anno_dict[file_name] = anno
 
+    # 4. 开始遍历本地文件夹里的图片
     for i, image_path in enumerate(image_dir.glob('*.png')):
-        if i > 10:
-            break
-        img_name = image_path.name
+        img_name = image_path.name  # 取纯文件名
 
+        # 5. 精准匹配
         if img_name in anno_dict:
             current_image_annotation = anno_dict[img_name]
 
             print(f"\n[{i + 1}] 正在处理: {img_name}")
 
-            # 5. 传给 agent！传的是字典，不是路径！
+            # 传给 agent！
             agent.run(str(image_path), str(save_dir), current_image_annotation)
         else:
-            print(f"⚠️ 警告: JSON 中没有找到图片 {img_name} 的标注记录，跳过该图。")
+            print(f"⚠️ 警告: JSON 中没有找到图片 {img_name} 的关联标注，跳过该图。")
