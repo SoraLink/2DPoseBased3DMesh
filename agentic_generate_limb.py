@@ -4,6 +4,8 @@ from pathlib import Path
 
 import cv2
 import time
+
+import dashscope
 import numpy as np
 import torch
 from PIL import Image
@@ -14,6 +16,9 @@ from pose_extractor import PoseExtractor
 
 _original_load = torch.load
 torch.load = lambda *args, **kwargs: _original_load(*args, **kwargs, weights_only=False) if 'weights_only' not in kwargs else _original_load(*args, **kwargs)
+
+dashscope.base_http_api_url = 'https://dashscope-intl.aliyuncs.com/api/v1'
+dashscope.api_key = os.getenv("DASHSCOPE_API_KEY")
 
 class LimbCompositingAgent:
     def __init__(self, pose_extractor, edit_model='qwen-image-2.0-pro'):
@@ -133,7 +138,7 @@ class LimbCompositingAgent:
 
         orig_bgr = cv2.imread(image_path)
         keypoint_types = original_annotation.get("keypoint_types", [])
-        kpts_orig = np.array(original_annotation["keypoints"])
+        kpts_orig = np.array(original_annotation["keypoints"]).reshape(-1, 3)
 
         # 获取切图规则
         rules = self._get_compositing_rules(keypoint_types)
@@ -208,6 +213,7 @@ class LimbCompositingAgent:
         api_attempt = 0
         while api_attempt < 3:
             try:
+                print(os.getenv("DASHSCOPE_API_KEY"))
                 # 沿用你之前跑通的 API 调用参数
                 response = MultiModalConversation.call(
                     api_key=os.getenv("DASHSCOPE_API_KEY"),
@@ -258,7 +264,7 @@ if __name__ == "__main__":
     agent = LimbCompositingAgent(pose_extractor)
 
     # 1. 一次性读取 COCO 格式的 JSON
-    annotation_path = Path('./data/train_final.json')
+    annotation_path = Path('./data/filtered_annotations_padded_png.json')
     with open(annotation_path, 'r', encoding='utf-8') as f:
         coco_data = json.load(f)
 
@@ -282,6 +288,7 @@ if __name__ == "__main__":
 
     # 4. 开始遍历本地文件夹里的图片
     for i, image_path in enumerate(image_dir.glob('*.png')):
+        if i > 1: break
         img_name = image_path.name  # 取纯文件名
 
         # 5. 精准匹配
