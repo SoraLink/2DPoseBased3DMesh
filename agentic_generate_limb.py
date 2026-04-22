@@ -64,7 +64,7 @@ class LimbCompositingAgent:
         极简版提取 Mask：不看任何 type，直接把锚点和所有下游点连成一条粗线。
         """
         height, width = image_shape[:2]
-        mask = np.ones((height, width), dtype=np.uint8) * 255
+        mask = np.zeros((height, width), dtype=np.uint8)
 
         # 动态计算粗细
         box_w, box_h = bbox[2], bbox[3]
@@ -85,9 +85,9 @@ class LimbCompositingAgent:
         if len(path_points) >= 2:
             for i in range(len(path_points) - 1):
                 p1, p2 = path_points[i], path_points[i + 1]
-                cv2.line(mask, p1, p2, color=0, thickness=limb_width)
-                cv2.circle(mask, p1, limb_width // 2, 0, -1)
-                cv2.circle(mask, p2, limb_width // 2, 0, -1)
+                cv2.line(mask, p1, p2, color=255, thickness=limb_width)
+                cv2.circle(mask, p1, limb_width // 2, 255, -1)
+                cv2.circle(mask, p2, limb_width // 2, 255, -1)
         else:
             print("⚠️ 警告：大模型生成的肢体关键点丢失，无法画出完整的提取 Mask。")
 
