@@ -33,57 +33,50 @@ class ReconstructionEngine:
 
     @torch.no_grad()
     def predict(self, image_path):
-        # 1. 官方读取方式
         img = cv2.imread(image_path)
         if img is None: return None
         raw_h, raw_w = img.shape[:2]
         raw_imgs = [img]
 
-        # 2. ⛩️ 官方 Detector (ViTDet)
+        # 1. 官方检测与切片
         detector_outputs = self.detector(raw_imgs)
-
-        # 3. ⛩️ 官方 Patching 逻辑
-        # imgs_det2patches 会把 BBox 自动对齐到 192:256 比例，这是 HSMR 精度的关键
         patches, det_meta = imgs_det2patches(raw_imgs, *detector_outputs, max_instances_per_img=1)
 
-        if len(patches) == 0:
-            print("🚫 没有检测到人物")
-            return None
+        if len(patches) == 0: return None
 
-        # 4. ⛩️ 官方预处理与推理
+        # 2. 官方模型推理
         patches_normalized = (patches - IMG_MEAN_255) / IMG_STD_255
         patches_normalized = torch.from_numpy(patches_normalized).permute(0, 3, 1, 2).to(self.device)
-
         outputs = self.pipeline(patches_normalized)
 
-        # 获取 3D 数据
+        # 3. 提取 Mesh 和参数
         pd_params = {k: v.detach().cpu() for k, v in outputs['pd_params'].items()}
-        pd_cam_t = outputs['pd_cam_t'].detach().cpu()
+        pd_cam_t = outputs['pd_cam_t'].detach().cpu()[0]  # [tx, ty, tz]
 
-        # 5. ⛩️ 官方 Mesh 准备 (获取顶点)
         m_skin, _ = prepare_mesh(self.pipeline, pd_params)
-        vertices = m_skin['v'][0].numpy()
+        vertices = m_skin['v'][0].numpy()  # 原始 6890 个顶点
 
-        # 6. ⛩️ 官方相机修正公式 (从 Visualize_full_img 抄过来的)
+        # 4. ⛩️ 官方相机修正逻辑 (确定的证据：来自 lib/kits/hsmr_demo.py)
         raw_cx, raw_cy = raw_w / 2.0, raw_h / 2.0
-        # bbx_cs 包含 [center_x, center_y, scale]
-        bbx_cs = det_meta['bbx_cs'][0]
+        bbx_cs = det_meta['bbx_cs'][0]  # [cx, cy, s]
+        focal = 5000.0  # 官方硬编码虚拟焦距
 
-        corrected_cam_t = pd_cam_t[0].clone()
-        # 深度 Z 修正
-        corrected_cam_t[2] = pd_cam_t[0, 2] * 256.0 / bbx_cs[2]
-        # X, Y 位移修正 (5000 是官方焦距常数)
-        corrected_cam_t[0] += (bbx_cs[0] - raw_cx) / 5000.0 * corrected_cam_t[2]
-        corrected_cam_t[1] += (bbx_cs[1] - raw_cy) / 5000.0 * corrected_cam_t[2]
+        corrected_cam_t = pd_cam_t.clone()
+        # 深度修正 (这是最重要的一步，解决了你之前坐标爆炸到几亿的问题)
+        corrected_cam_t[2] = pd_cam_t[2] * 256.0 / bbx_cs[2]
+        # X, Y 位移补偿
+        corrected_cam_t[0] += (bbx_cs[0] - raw_cx) / focal * corrected_cam_t[2]
+        corrected_cam_t[1] += (bbx_cs[1] - raw_cy) / focal * corrected_cam_t[2]
 
-        # 同步修正顶点位置，让它在全局坐标系下
-        global_vertices = vertices + (corrected_cam_t.numpy() - pd_cam_t[0].numpy())
+        # ⛩️ 5. 将顶点转换到全局原图相机空间
+        # 只有这样，外层的 project_mesh_overlay 才能用统一的 K 矩阵投回原图
+        global_vertices = vertices + corrected_cam_t.numpy()
 
         return {
             'vertices': global_vertices,
             'bbox_cs': bbx_cs,
             'global_cam': {
-                'focal': np.array([5000.0, 5000.0]),
+                'focal': np.array([focal, focal]),
                 'princpt': np.array([raw_cx, raw_cy])
             }
         }
