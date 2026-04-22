@@ -180,7 +180,8 @@ def project_mesh_overlay(image_path, gen_image_path, mesh, global_cam, output_di
         img_out[mask_bool] = overlay[mask_bool]
 
         # 保存图片
-        out_name = os.path.basename(img_path).replace(".jpg", f"_{suffix}.jpg")
+        base_name = os.path.splitext(os.path.basename(img_path))[0]
+        out_name = f"{base_name}_{suffix}.jpg"
         out_path = os.path.join(output_dir, out_name)
         cv2.imencode(".jpg", img_out)[1].tofile(out_path)
 
@@ -470,7 +471,7 @@ def main(ori_image_path, gen_image_path,reconstructor, annotation_file):
             'focal': global_focal,
             'princpt': np.array([global_cx, global_cy])
         }
-        orig_proj_path, pred_mask_orig, gen_proj_path, pred_mask_gen = project_mesh_overlay(ori_image_path, gen_image_path, mesh, global_cam, mesh_save_path)
+        orig_proj_path, pred_mask_orig, gen_proj_path, pred_mask_gen = project_mesh_overlay(ori_image_path, gen_image_path, mesh, global_cam, dir_name)
         mask_gt = load_gt_mask(ori_image_path)
         miou_score = calculate_miou(pred_mask_orig, mask_gt)
         print(f"      -> miou_score: {miou_score:.4f}")
