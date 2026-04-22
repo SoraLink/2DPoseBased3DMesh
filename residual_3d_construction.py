@@ -2,7 +2,7 @@ import os
 
 from main_pipeline import calculate_miou
 from pose_extractor import read_kpts_annotation
-from reconstruction_3d import ReconstructionEngine
+from HSMR import ReconstructionEngine
 
 import os
 import cv2
