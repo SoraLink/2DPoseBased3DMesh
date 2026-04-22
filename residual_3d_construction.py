@@ -426,7 +426,8 @@ def load_gt_mask(image_path):
 
 def main(ori_image_path, gen_image_path,reconstructor, annotation_file):
     kpts_orig, kpts, types_orig = read_kpts_annotation(ori_image_path, annotation_file)
-    mesh_save_path = os.path.dirname(gen_image_path)
+    dir_name = os.path.dirname(gen_image_path)
+    mesh_save_path = os.path.join(dir_name, "whole_body_mesh.obj")
     mesh_save_path, pred_joints_3d, pred_cam = reconstructor.predict_mesh(gen_image_path, mesh_save_path)
     cut_tasks = []
     for i in range(23, 31):
