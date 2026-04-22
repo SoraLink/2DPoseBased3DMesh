@@ -479,4 +479,4 @@ if __name__ == "__main__":
     reconstructor = ReconstructionEngine()
     gen_image_path = './workdir1/bing_義足のランナー_6068/final.png'
     ori_image_path = './data/eval_seg_padded/bing_義足のランナー_6068.png'
-    main(image_path, reconstructor)
+    main(ori_image_path, gen_image_path, reconstructor, annotation_file='./data/filtered_annotations_padded_png.json')
