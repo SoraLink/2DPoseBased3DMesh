@@ -193,6 +193,45 @@ def project_mesh_overlay(image_path, gen_image_path, mesh, global_cam, output_di
 
     return orig_out_path, mask_orig, gen_out_path, mask_gen
 
+
+import numpy as np
+
+
+def calculate_2d_mpjpe(pred_joints_3d, gt_kpts_orig, global_cam, mapping_dict):
+    """
+    计算 2D MPJPE (平均单关节位置误差)。
+    由于图像已完全对齐，无需 M_inv，直接计算投影点与 GT 点的欧氏距离。
+    """
+    focal = global_cam['focal']
+    princpt = global_cam['princpt']
+
+    errors = []
+    for joint_name, gt_idx in mapping_dict.items():
+        if joint_name not in pred_joints_3d:
+            continue
+
+        gt_x, gt_y, conf = gt_kpts_orig[gt_idx]
+        # 忽略未标注或置信度不达标的点
+        if conf <= 0:
+            continue
+
+        vert = pred_joints_3d[joint_name]
+
+        # 防止 Z 轴为 0 或点在相机背面导致计算异常
+        if vert[2] <= 1e-5:
+            continue
+
+        # 1. 直接投影到原图坐标系 (Gen 和 Orig 相同)
+        proj_x = focal[0] * (vert[0] / vert[2]) + princpt[0]
+        proj_y = focal[1] * (vert[1] / vert[2]) + princpt[1]
+
+        # 2. 计算 2D 欧氏距离 (像素级误差)
+        err = np.linalg.norm(np.array([proj_x, proj_y]) - np.array([gt_x, gt_y]))
+        errors.append(err)
+
+    # 返回所有有效关键点误差的平均值
+    return float(np.mean(errors)) if errors else 0.0
+
 class ResidualMeshCutter2:
     def __init__(self, focal_length, img_center):
         """
@@ -475,7 +514,12 @@ def main(ori_image_path, gen_image_path,reconstructor, annotation_file):
         mask_gt = load_gt_mask(ori_image_path)
         miou_score = calculate_miou(pred_mask_orig, mask_gt)
         print(f"      -> miou_score: {miou_score:.4f}")
-
+        INTACT_MAPPING = {METAINFO['keypoint_info'][i]['name']: i for i in range(0, 17)}
+        RES_MAPPING = {METAINFO['keypoint_info'][i]['name']: i for i in range(23, 31)}
+        mpjpe_intact = calculate_2d_mpjpe(pred_joints_3d, kpts_orig, global_cam, INTACT_MAPPING)
+        mpjpe_residual = calculate_2d_mpjpe(pred_joints_3d, kpts_orig, global_cam, RES_MAPPING)
+        print(f"📊 [量化评估] 完整关节 2D MPJPE: {mpjpe_intact:.2f} pixels")
+        print(f"📊 [量化评估] 残肢端点 2D MPJPE: {mpjpe_residual:.2f} pixels")
 
 if __name__ == "__main__":
     reconstructor = ReconstructionEngine()
