@@ -123,11 +123,11 @@ class ReconstructionEngine:
             'right_wrist': synced_joints[21],
 
             # 五官点 (SMPL-X 拓扑固定，索引不变)
-            'nose': vertices[9120],
-            'left_eye': vertices[9448],
-            'right_eye': vertices[9929],
-            'left_ear': vertices[6],
-            'right_ear': vertices[616],
+            'nose': vertices[331],
+            'left_eye': vertices[332],
+            'right_eye': vertices[329],
+            'left_ear': vertices[348],
+            'right_ear': vertices[349],
         }
 
         return save_path, pred_joints_dict, res['global_cam']
