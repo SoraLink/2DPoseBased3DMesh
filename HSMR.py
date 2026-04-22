@@ -34,53 +34,55 @@ class ReconstructionEngine:
 
     @torch.no_grad()
     def predict(self, image_path):
-        # ⛩️ 1. Preprocess (官方 Load Inputs & Detecting)
+        # 1. 官方读取方式
         img = cv2.imread(image_path)
         if img is None: return None
-        raw_imgs = [img]  # 包装成 list 适配 detector
+        raw_h, raw_w = img.shape[:2]
+        raw_imgs = [img]
 
-        # 调用官方 Detector
+        # 2. ⛩️ 官方 Detector (ViTDet)
         detector_outputs = self.detector(raw_imgs)
 
-        # 调用官方 Patching (关键：这里会处理 BBox 并切好 256x256 的图)
+        # 3. ⛩️ 官方 Patching 逻辑
+        # imgs_det2patches 会把 BBox 自动对齐到 192:256 比例，这是 HSMR 精度的关键
         patches, det_meta = imgs_det2patches(raw_imgs, *detector_outputs, max_instances_per_img=1)
 
         if len(patches) == 0:
-            print("🚫 No human instance detected.")
+            print("🚫 没有检测到人物")
             return None
 
-        # ⛩️ 2. Recovery (官方 Recovery 循环)
-        # 归一化
+        # 4. ⛩️ 官方预处理与推理
         patches_normalized = (patches - IMG_MEAN_255) / IMG_STD_255
         patches_normalized = torch.from_numpy(patches_normalized).permute(0, 3, 1, 2).to(self.device)
 
-        # 模型推理
         outputs = self.pipeline(patches_normalized)
 
-        # 提取参数
+        # 获取 3D 数据
         pd_params = {k: v.detach().cpu() for k, v in outputs['pd_params'].items()}
         pd_cam_t = outputs['pd_cam_t'].detach().cpu()
 
-        # ⛩️ 3. Prepare Meshes (调用官方 prepare_mesh 获取顶点)
-        # 注意：官方这个函数返回 m_skin['v'], m_skin['f']
+        # 5. ⛩️ 官方 Mesh 准备 (获取顶点)
         m_skin, _ = prepare_mesh(self.pipeline, pd_params)
+        vertices = m_skin['v'][0].numpy()
 
-        # 计算全局相机参数 (沿用官方渲染逻辑中的修正)
-        raw_h, raw_w = img.shape[:2]
+        # 6. ⛩️ 官方相机修正公式 (从 Visualize_full_img 抄过来的)
         raw_cx, raw_cy = raw_w / 2.0, raw_h / 2.0
-        bbx_cs = det_meta['bbx_cs'][0]  # [cx, cy, s]
+        # bbx_cs 包含 [center_x, center_y, scale]
+        bbx_cs = det_meta['bbx_cs'][0]
 
-        # 官方相机平移修正逻辑
         corrected_cam_t = pd_cam_t[0].clone()
+        # 深度 Z 修正
         corrected_cam_t[2] = pd_cam_t[0, 2] * 256.0 / bbx_cs[2]
-        corrected_cam_t[1] += (bbx_cs[1] - raw_cy) / 5000.0 * corrected_cam_t[2]
+        # X, Y 位移修正 (5000 是官方焦距常数)
         corrected_cam_t[0] += (bbx_cs[0] - raw_cx) / 5000.0 * corrected_cam_t[2]
+        corrected_cam_t[1] += (bbx_cy - raw_cy) / 5000.0 * corrected_cam_t[2]
+
+        # 同步修正顶点位置，让它在全局坐标系下
+        global_vertices = vertices + (corrected_cam_t.numpy() - pd_cam_t[0].numpy())
 
         return {
-            'pd_params': pd_params,
-            'vertices': m_skin['v'][0].numpy(),
-            'cam_t': corrected_cam_t.numpy(),
-            'bbox': bbx_cs,  # 官方返回的是 [cx, cy, s]
+            'vertices': global_vertices,
+            'bbox_cs': bbx_cs,
             'global_cam': {
                 'focal': np.array([5000.0, 5000.0]),
                 'princpt': np.array([raw_cx, raw_cy])
