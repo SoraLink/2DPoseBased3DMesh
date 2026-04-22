@@ -1,4 +1,7 @@
+import json
 import os
+from pathlib import Path
+
 import cv2
 import time
 import numpy as np
@@ -6,6 +9,7 @@ from PIL import Image
 from dashscope import MultiModalConversation
 
 from image_ops import ImageProcessor
+from pose_extractor import PoseExtractor
 
 
 class LimbCompositingAgent:
@@ -237,3 +241,40 @@ class LimbCompositingAgent:
                 print(f"❌ API 调用崩溃 (网络重试 {api_attempt}/3): {str(e)}")
 
         return None
+
+
+if __name__ == "__main__":
+    image_dir = Path('./data/eval_seg_padded')
+    save_dir = Path('./workdir1')
+
+    pose_extractor = PoseExtractor(
+        config_file='./models/pose/vit_config.py',
+        checkpoint_file='./models/pose/epoch_1.pth',
+        device='cuda:0'
+    )
+    agent = LimbCompositingAgent(pose_extractor)
+
+    # 1. 在循环外，一次性读取整个 JSON 标注文件
+    annotation_path = Path('./data/train_final.json')
+    with open(annotation_path, 'r', encoding='utf-8') as f:
+        dataset_annotations = json.load(f)
+
+    anno_dict = {}
+    for anno in dataset_annotations:
+        filename = anno['file_name']
+        anno_dict[filename] = anno
+
+    for i, image_path in enumerate(image_dir.glob('*.png')):
+        if i > 10:
+            break
+        img_name = image_path.name
+
+        if img_name in anno_dict:
+            current_image_annotation = anno_dict[img_name]
+
+            print(f"\n[{i + 1}] 正在处理: {img_name}")
+
+            # 5. 传给 agent！传的是字典，不是路径！
+            agent.run(str(image_path), str(save_dir), current_image_annotation)
+        else:
+            print(f"⚠️ 警告: JSON 中没有找到图片 {img_name} 的标注记录，跳过该图。")
