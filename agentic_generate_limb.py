@@ -94,42 +94,37 @@ class LimbCompositingAgent:
         return mask
 
     def align_and_blend(self, orig_bgr, gen_bgr, mask_uint8, pt_orig_anchor, pt_orig_res, pt_gen_anchor, pt_gen_end):
-        """核心仿射变换与泊松融合"""
-        # 1. 计算夹角差
+        """放弃泊松融合，改用清晰度更高的 Alpha 混合"""
+        # 1. 计算仿射变换矩阵 (保持不变)
         vec_orig = pt_orig_res - pt_orig_anchor
         vec_gen = pt_gen_end - pt_gen_anchor
+        angle_diff = np.degrees(np.arctan2(vec_orig[1], vec_orig[0]) - np.arctan2(vec_gen[1], vec_gen[0]))
+        tx, ty = pt_orig_anchor[0] - pt_gen_anchor[0], pt_orig_anchor[1] - pt_gen_anchor[1]
 
-        angle_orig = np.arctan2(vec_orig[1], vec_orig[0])
-        angle_gen = np.arctan2(vec_gen[1], vec_gen[0])
-        angle_diff = np.degrees(angle_orig - angle_gen)
-
-        # 2. 计算平移差
-        tx = pt_orig_anchor[0] - pt_gen_anchor[0]
-        ty = pt_orig_anchor[1] - pt_gen_anchor[1]
-
-        # 3. 构建仿射矩阵并变换
         center_pt = (float(pt_gen_anchor[0]), float(pt_gen_anchor[1]))
         M = cv2.getRotationMatrix2D(center_pt, angle_diff, 1.0)
         M[0, 2] += tx
         M[1, 2] += ty
 
+        # 2. 变换素材和遮罩
         h, w = orig_bgr.shape[:2]
-        warped_gen = cv2.warpAffine(gen_bgr, M, (w, h))
-        warped_mask = cv2.warpAffine(mask_uint8, M, (w, h))
+        # 背景统一用白色填充
+        warped_gen = cv2.warpAffine(gen_bgr, M, (w, h), borderValue=(255, 255, 255))
+        warped_mask = cv2.warpAffine(mask_uint8, M, (w, h), borderValue=0)
 
-        # 4. 泊松融合
-        contours, _ = cv2.findContours(warped_mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-        if not contours: return orig_bgr
+        # 3. 【关键】对 Mask 进行羽化，防止边缘锯齿
+        # 使用较小的高斯模糊 (如 5x5 或 7x7)，既能软化边缘，又不会像泊松那样弄花整条腿
+        feathered_mask = cv2.GaussianBlur(warped_mask, (7, 7), 0)
+        alpha = feathered_mask.astype(float) / 255.0
+        alpha = cv2.merge([alpha, alpha, alpha])  # 转为3通道
 
-        c = max(contours, key=cv2.contourArea)
-        x, y, w_box, h_box = cv2.boundingRect(c)
-        center = (int(x + w_box / 2), int(y + h_box / 2))
+        # 4. 直接合成 (Final = 素材 * alpha + 原图 * (1-alpha))
+        foreground = warped_gen.astype(float)
+        background = orig_bgr.astype(float)
 
-        try:
-            return cv2.seamlessClone(warped_gen, orig_bgr, warped_mask, center, cv2.NORMAL_CLONE)
-        except Exception:
-            mask_3d = warped_mask[:, :, None] / 255.0
-            return (warped_gen * mask_3d + orig_bgr * (1 - mask_3d)).astype(np.uint8)
+        final_img = (foreground * alpha + background * (1.0 - alpha)).astype(np.uint8)
+
+        return final_img
 
     def run(self, image_path, base_output_dir, original_annotation):
         print("\n" + "=" * 50)
