@@ -1,5 +1,6 @@
 import json
 import os
+import re
 from pathlib import Path
 
 import cv2
@@ -21,15 +22,24 @@ dashscope.base_http_api_url = 'https://dashscope-intl.aliyuncs.com/api/v1'
 dashscope.api_key = os.getenv("DASHSCOPE_API_KEY")
 
 class LimbCompositingAgent:
-    def __init__(self, pose_extractor, edit_model='qwen-image-2.0-pro'):
+    def __init__(self, pose_extractor, edit_model='qwen-image-2.0-pro', eval_model='qwen3.6-plus'):
         self.edit_model = edit_model
         self.pose_extractor = pose_extractor
-
+        self.eval_model = eval_model
         self.generation_instruction = """
-        [Task: Character Completion]
-        Please completely reconstruct and generate the missing limbs of the person in the image.
-        Ensure the generated limbs look highly realistic and match the person's skin tone, lighting, and proportions perfectly.
-        Keep the background exactly the same white.
+        [任务: 健全肢体生成]
+        图中是一个确实肢体的残疾人。有可能带假肢有可能不带。确认残疾肢体位置，如果是带假肢的人将假肢替换成健全肢体。如果没带假肢请把他的肢体沿着
+        残肢的方向补全。确保背景是白色不变。
+        """
+        self.eval_instruction = """
+        [任务: 确认肢体健全]
+        观察图片是否是一个四肢健全的人。如果发现肢体缺失或者带有假肢都算图片不合格。可以接受某些肢体被身体遮挡看不见，但是不能有可见的残肢端点
+        
+        输出按照JSON格式:
+        {{
+            "passed": true/false,
+            "reason": 描述不合格原因比如有假肢或者某个肢体存在残肢。
+        }}
         """
 
     def _get_compositing_rules(self, keypoint_types):
@@ -58,6 +68,40 @@ class LimbCompositingAgent:
                     "downstream": rule[2]
                 })
         return rules
+
+    def evaluate_image(self, image_path):
+        generated_image = ImageProcessor.encode_file(image_path)
+        messages = [{
+            "role": "user",
+            "content": [
+                {"imaeg": generated_image},
+                {"text": self.eval_instruction},
+            ]
+        }]
+        resp = MultiModalConversation.call(
+            model=self.eval_model,
+            messages=messages,
+            temperature=0.1,
+            response_format={"type": "json_object"},
+        )
+        if resp.status_code != 200:
+            raise RuntimeError(f"❌ VLM 评估失败: {resp.message}")
+
+        content = resp.output.choices[0].message.content
+
+        if isinstance(content, list):
+            text_parts = [item['text'] for item in content if 'text' in item]
+            content = "".join(text_parts)
+
+        # 清洗可能混入的思考标签或 Markdown
+        match = re.search(r'\{.*\}', content, re.DOTALL)
+        if match:
+            content = match.group(0)
+
+        try:
+            return json.loads(content)
+        except json.JSONDecodeError:
+            return {"passed": False, "reason": "JSON_PARSE_ERROR"}
 
     def generate_pure_extraction_mask(self, image_shape, kpts_gen, anchor_idx, downstream_indices, bbox):
         """
@@ -126,7 +170,7 @@ class LimbCompositingAgent:
 
         return final_img
 
-    def run(self, image_path, base_output_dir, original_annotation):
+    def run(self, image_path, base_output_dir, original_annotation, max_attempts=3):
         print("\n" + "=" * 50)
         print(f"🔪 启动骨架刻刀再植流水线 (Clean Logic)")
         print("=" * 50)
@@ -165,8 +209,12 @@ class LimbCompositingAgent:
         save_dir = os.path.join(base_output_dir, base_name)
         os.makedirs(save_dir, exist_ok=True)
 
-        # gen_image_path = self.generate_full_image(image_path, save_dir)
-        gen_image_path='./workdir1/bing_義足のランナー_6068/compositing_material_raw_gen.jpg'
+        for i in range(max_attempts):
+            gen_image_path = self.generate_full_image(image_path, save_dir)
+            eval_res = self.evaluate_image(gen_image_path)
+            print(f"📊 评估: {'✅ 通过' if eval_res['passed'] else '❌ 未通过'}")
+            print(f"📝 原因: {eval_res.get('reason', '-')}")
+        # gen_image_path='./workdir1/bing_義足のランナー_6068/compositing_material_raw_gen.jpg'
         # 提取生成图关键点和 bbox
         kpts_gen = self.pose_extractor.extract_31_keypoints(gen_image_path)
         gen_bgr = cv2.imread(gen_image_path)
