@@ -556,6 +556,7 @@ if __name__ == "__main__":
         miou += current_miou
         mpjpe_intact += current_intact
         mpjpe_residual += current_residual
+    dirs = list(workdir.glob('*'))
     print(f"\n📈 [最终平均评估] 平均 mIoU: {miou/len(dirs):.4f}")
     print(f"📈 [最终平均评估] 平均完整关节 2D MPJPE: {mpjpe_intact/len(dirs):.2f} pixels")
     print(f"📈 [最终平均评估] 平均残肢端点 2D MPJPE: {mpjpe_residual/len(dirs):.2f} pixels")
