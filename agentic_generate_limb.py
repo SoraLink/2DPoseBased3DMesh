@@ -345,79 +345,95 @@ class LimbCompositingAgent:
         save_dir = os.path.join(base_output_dir, base_name)
         os.makedirs(save_dir, exist_ok=True)
 
-        for attempt in range(max_attempts):
-            print(f"\n🔄 尝试修复 ({attempt + 1}/{max_attempts})...")
-
-            # =========================================================
-            # 核心改动 2：无论第几次尝试，永远传入【原图】 + 【Master Prompt】
-            # =========================================================
-            gen_image_path = self.generate_full_image(image_path, save_dir, master_prompt, str(attempt))
-
-            if not gen_image_path:
-                print("❌ 图片生成失败，跳过本次重试。")
-                continue
-
-            # =========================================================
-            # 核心改动 3：对【生成的新图】进行姿态提取和“复查”
-            # =========================================================
-            # 注意：这里必须提取生成图的 kpts！不能用原图的！
-
-            gen_eval_res = self.evaluate_image(gen_image_path, res['eval_instruction'])
-
-            print(f"📊 复查评估: {'✅ 通过' if gen_eval_res['passed'] else '❌ 未通过'}")
-
-            if gen_eval_res['passed']:
-                print("🎉 肢体补全成功！")
-                # 走你后面的对齐、抠图缝合逻辑...
-                break
-            else:
-                print(f"⚠️ 生成图依然存在问题: {gen_eval_res['reason']}")
-
-        # rules = self._get_compositing_rules(kpt_types_orig)
+        # for attempt in range(max_attempts):
+        #     print(f"\n🔄 尝试修复 ({attempt + 1}/{max_attempts})...")
         #
-        # if not rules:
-        #     raise ValueError('No rules found!')
+        #     # =========================================================
+        #     # 核心改动 2：无论第几次尝试，永远传入【原图】 + 【Master Prompt】
+        #     # =========================================================
+        #     gen_image_path = self.generate_full_image(image_path, save_dir, master_prompt, str(attempt))
+        #
+        #     if not gen_image_path:
+        #         print("❌ 图片生成失败，跳过本次重试。")
+        #         continue
+        #
+        #     # =========================================================
+        #     # 核心改动 3：对【生成的新图】进行姿态提取和“复查”
+        #     # =========================================================
+        #     # 注意：这里必须提取生成图的 kpts！不能用原图的！
+        #
+        #     gen_eval_res = self.evaluate_image(gen_image_path, res['eval_instruction'])
+        #
+        #     print(f"📊 复查评估: {'✅ 通过' if gen_eval_res['passed'] else '❌ 未通过'}")
+        #
+        #     if gen_eval_res['passed']:
+        #         print("🎉 肢体补全成功！")
+        #         # 走你后面的对齐、抠图缝合逻辑...
+        #         break
+        #     else:
+        #         print(f"⚠️ 生成图依然存在问题: {gen_eval_res['reason']}")
+
+        rules = self._get_compositing_rules(kpt_types_orig)
+
+        if not rules:
+            raise ValueError('No rules found!')
         # gen_image_path='./workdir1/bing_義足のランナー_6068/compositing_material_raw_gen.jpg'
+        image_folder = Path(save_dir)
+
+        # --- 极简逻辑 ---
+        # 1. 拿到目录下所有文件，排除 final.png
+        # 只要是文件就全收进来，不管它是 .png, .jpg 还是其他
+        all_files = [str(p) for p in image_folder.iterdir() if p.is_file() and p.name != 'final.png']
+
+        if not all_files:
+            raise FileNotFoundError(f"目录 {save_dir} 是空的，没找到素材。")
+
+        # 2. 字母序排序
+        all_files.sort()
+        # 3. 取最后一张
+        gen_image_path = all_files[-1]
+
+        print(f"🎯 选定融合素材: {gen_image_path}")
         # 提取生成图关键点和 bbox
-        # kpts_gen = self.pose_extractor.extract_31_keypoints(gen_image_path)
-        # gen_bgr = cv2.imread(gen_image_path)
-        #
-        # valid_kpts = kpts_gen[kpts_gen[:, 2] > 0.1]
-        # min_x, min_y = np.min(valid_kpts[:, :2], axis=0)
-        # max_x, max_y = np.max(valid_kpts[:, :2], axis=0)
-        # bbox_gen = [min_x, min_y, max_x - min_x, max_y - min_y]
-        #
-        # current_canvas = orig_bgr.copy()
-        #
-        # # 开始切割缝合
-        # for rule in rules:
-        #     print(f"✂️ 直接沿正常关节提取肢体...")
-        #
-        #     # 极简提取法：直接传入生成的关键点、锚点和下游点列表
-        #     limb_mask = self.generate_pure_extraction_mask(
-        #         image_shape=gen_bgr.shape,
-        #         kpts_gen=kpts_gen,
-        #         anchor_idx=rule["orig_anchor"],
-        #         downstream_indices=rule["downstream"],
-        #         bbox=bbox_gen
-        #     )
-        #
-        #     # 获取物理坐标进行对齐
-        #     pt_orig_anchor = kpts_orig[rule['orig_anchor'], :2]
-        #     pt_orig_res = kpts_orig[rule['orig_res'], :2]
-        #
-        #     pt_gen_anchor = kpts_gen[rule['orig_anchor'], :2]
-        #     # 计算方向所用的终点，取最末端的关节
-        #     pt_gen_end = kpts_gen[rule['downstream'][0], :2]
-        #
-        #     # 缝合
-        #     current_canvas = self.align_and_blend(
-        #         current_canvas, gen_bgr, limb_mask,
-        #         pt_orig_anchor, pt_orig_res, pt_gen_anchor, pt_gen_end
-        #     )
-        # final_path = os.path.join(save_dir, 'final.png')
-        # cv2.imwrite(final_path, current_canvas)
-        # return final_path
+        kpts_gen = self.pose_extractor.extract_31_keypoints(gen_image_path)
+        gen_bgr = cv2.imread(gen_image_path)
+
+        valid_kpts = kpts_gen[kpts_gen[:, 2] > 0.1]
+        min_x, min_y = np.min(valid_kpts[:, :2], axis=0)
+        max_x, max_y = np.max(valid_kpts[:, :2], axis=0)
+        bbox_gen = [min_x, min_y, max_x - min_x, max_y - min_y]
+
+        current_canvas = orig_bgr.copy()
+
+        # 开始切割缝合
+        for rule in rules:
+            print(f"✂️ 直接沿正常关节提取肢体...")
+
+            # 极简提取法：直接传入生成的关键点、锚点和下游点列表
+            limb_mask = self.generate_pure_extraction_mask(
+                image_shape=gen_bgr.shape,
+                kpts_gen=kpts_gen,
+                anchor_idx=rule["orig_anchor"],
+                downstream_indices=rule["downstream"],
+                bbox=bbox_gen
+            )
+
+            # 获取物理坐标进行对齐
+            pt_orig_anchor = kpts_orig[rule['orig_anchor'], :2]
+            pt_orig_res = kpts_orig[rule['orig_res'], :2]
+
+            pt_gen_anchor = kpts_gen[rule['orig_anchor'], :2]
+            # 计算方向所用的终点，取最末端的关节
+            pt_gen_end = kpts_gen[rule['downstream'][0], :2]
+
+            # 缝合
+            current_canvas = self.align_and_blend(
+                current_canvas, gen_bgr, limb_mask,
+                pt_orig_anchor, pt_orig_res, pt_gen_anchor, pt_gen_end
+            )
+        final_path = os.path.join(save_dir, 'final.png')
+        cv2.imwrite(final_path, current_canvas)
+        return final_path
 
     def generate_full_image(self, image_path, save_dir, prompt, iter):
         """
@@ -522,9 +538,9 @@ if __name__ == "__main__":
             print(f"\n[{i + 1}] 正在处理: {img_name}")
             base_name = os.path.splitext(os.path.basename(image_path))[0]
             target_dir = os.path.join(save_dir, base_name)
-            if os.path.exists(target_dir):
-                print(f"⚠️ 目录 {target_dir} 已存在，跳过该图以避免覆盖。")
-                continue
+            # if os.path.exists(target_dir):
+            #     print(f"⚠️ 目录 {target_dir} 已存在，跳过该图以避免覆盖。")
+            #     continue
             # 传给 agent！
             agent.run(str(image_path), str(save_dir), current_image_annotation)
             break
