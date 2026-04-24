@@ -466,10 +466,16 @@ def load_gt_mask(image_path):
     return mask
 
 def main(ori_image_path, gen_image_path,reconstructor, annotation_file):
+    img_ori_temp = cv2.imread(ori_image_path)
+    target_h, target_w = img_ori_temp.shape[:2]
+    img_gen_temp = cv2.imread(gen_image_path)
+    img_gen_resized = cv2.resize(img_gen_temp, (target_w, target_h), interpolation=cv2.INTER_AREA)
+    temp_gen_path = gen_image_path.replace(".png", "_resized.png")
+    cv2.imwrite(temp_gen_path, img_gen_resized)
     kpts_orig, kpts, types_orig = read_kpts_annotation(ori_image_path, annotation_file)
-    dir_name = os.path.dirname(gen_image_path)
+    dir_name = os.path.dirname(temp_gen_path)
     mesh_save_path = os.path.join(dir_name, "whole_body_mesh.obj")
-    mesh_save_path, pred_joints_3d, pred_cam = reconstructor.predict_mesh(gen_image_path, mesh_save_path)
+    mesh_save_path, pred_joints_3d, pred_cam = reconstructor.predict_mesh(temp_gen_path, mesh_save_path)
     cut_tasks = []
     for i in range(23, 31):
         # 判断: 只有 type == 0 才是有效残肢点，且确保坐标数组够长
@@ -511,7 +517,7 @@ def main(ori_image_path, gen_image_path,reconstructor, annotation_file):
             'focal': global_focal,
             'princpt': np.array([global_cx, global_cy])
         }
-        orig_proj_path, pred_mask_orig, gen_proj_path, pred_mask_gen = project_mesh_overlay(ori_image_path, gen_image_path, mesh, global_cam, dir_name)
+        orig_proj_path, pred_mask_orig, gen_proj_path, pred_mask_gen = project_mesh_overlay(ori_image_path, temp_gen_path, mesh, global_cam, dir_name)
         mask_gt = load_gt_mask(ori_image_path)
         miou_score = calculate_miou(pred_mask_orig, mask_gt)
         print(f"      -> miou_score: {miou_score:.4f}")
