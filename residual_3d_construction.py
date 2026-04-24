@@ -271,10 +271,10 @@ class ResidualMeshCutter2:
         p_start = project(bone_start_3d)
         p_end = project(bone_end_3d)
 
-        print(f"      🔍 [坐标对齐核查 - 已简化]")
-        print(f"         - 标注点 (pt_2d)      : [{pt_2d[0]:.1f}, {pt_2d[1]:.1f}]")
-        print(f"         - 骨骼起始投影 (p_start): [{p_start[0]:.1f}, {p_start[1]:.1f}]")
-        print(f"         - 骨骼末端投影 (p_end)  : [{p_end[0]:.1f}, {p_end[1]:.1f}]")
+        # print(f"      🔍 [坐标对齐核查 - 已简化]")
+        # print(f"         - 标注点 (pt_2d)      : [{pt_2d[0]:.1f}, {pt_2d[1]:.1f}]")
+        # print(f"         - 骨骼起始投影 (p_start): [{p_start[0]:.1f}, {p_start[1]:.1f}]")
+        # print(f"         - 骨骼末端投影 (p_end)  : [{p_end[0]:.1f}, {p_end[1]:.1f}]")
 
         # 2. 计算 2D 向量
         bone_vec_2d = p_end - p_start
@@ -316,7 +316,7 @@ class ResidualMeshCutter2:
         """
         执行多处截肢任务，Watertight 封口，并强制生成抛物线生理鼓包
         """
-        print(f"\n🔪 [Mesh Cutter] 正在手术 (对齐模式: 直接投影)")
+        # print(f"\n🔪 [Mesh Cutter] 正在手术 (对齐模式: 直接投影)")
         if not cut_tasks:
             return trimesh.load(mesh_path, process=False)
 
@@ -325,7 +325,7 @@ class ResidualMeshCutter2:
 
         for task in cut_tasks:
             part_name = task.get('name', '未知部位')
-            print(f"   -> 处理部位: {part_name}")
+            # print(f"   -> 处理部位: {part_name}")
 
             # 直接计算 Lambda，不再进行坐标转换
             lambda_cut = self._calculate_exact_cut_proportion_2d_driven(
@@ -378,7 +378,7 @@ class ResidualMeshCutter2:
         # ==========================================================
         # 第一阶段：PyMeshLab 拓扑封口与细分
         # ==========================================================
-        print(f"      -> 开始拓扑重建 (Watertight 封口)...")
+        # print(f"      -> 开始拓扑重建 (Watertight 封口)...")
         temp_obj_path = mesh_path.replace(".obj", "_temp_hole.obj")
         mesh.export(temp_obj_path)
 
@@ -398,7 +398,7 @@ class ResidualMeshCutter2:
         # ==========================================================
         # 第二阶段：Trimesh 自适应物理顶出鼓包
         # ==========================================================
-        print(f"      -> 开始施加端点物理膨胀...")
+        # print(f"      -> 开始施加端点物理膨胀...")
         sealed_mesh = trimesh.load(output_path, process=False)
 
         for task in cut_tasks:
@@ -427,7 +427,7 @@ class ResidualMeshCutter2:
 
         trimesh.smoothing.filter_laplacian(sealed_mesh, iterations=4)
         sealed_mesh.export(output_path)
-        print("      ✅ 已成功生成完美弧度残肢端点。")
+        # print("      ✅ 已成功生成完美弧度残肢端点。")
 
         return sealed_mesh
 
@@ -475,7 +475,11 @@ def main(ori_image_path, gen_image_path,reconstructor, annotation_file):
     kpts_orig, kpts, types_orig = read_kpts_annotation(ori_image_path, annotation_file)
     dir_name = os.path.dirname(temp_gen_path)
     mesh_save_path = os.path.join(dir_name, "whole_body_mesh.obj")
-    mesh_save_path, pred_joints_3d, pred_cam = reconstructor.predict_mesh(ori_image_path, mesh_save_path)
+    try:
+        mesh_save_path, pred_joints_3d, pred_cam = reconstructor.predict_mesh(ori_image_path, mesh_save_path)
+    except Exception as e:
+        print(e)
+        continue
     cut_tasks = []
     for i in range(23, 31):
         # 判断: 只有 type == 0 才是有效残肢点，且确保坐标数组够长
@@ -552,6 +556,7 @@ if __name__ == "__main__":
         # 3. 取最后一张
         gen_image_path = all_files[-1]
         ori_image_path = f'./data/eval_seg_padded/{dir.name}.png'
+        print(f'start to analyse image {gen_image_path}')
         current_miou, current_intact, current_residual = main(ori_image_path, gen_image_path, reconstructor, annotation_file='./data/filtered_annotations_padded_png.json')
         miou += current_miou
         mpjpe_intact += current_intact
