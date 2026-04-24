@@ -55,6 +55,26 @@ class PoseExtractor:
 
         return kpts_31
 
+    def extract_keypoints(self, image_path: str) -> (np.ndarray, np.ndarray):
+        img = cv2.imread(image_path, cv2.IMREAD_COLOR)
+
+        if img is None:
+            raise ValueError("❌ 图像解码失败，URL 可能未返回有效的图片数据。")
+
+        h, w = img.shape[:2]
+        bbox = np.array([[0, 0, w, h]])
+        with torch.no_grad():
+            batch_results = inference_topdown(self.model, img, bboxes=bbox)
+
+        pred_instances = batch_results[0].pred_instances
+        keypoints = pred_instances.keypoints[0]  # shape: [31, 2]
+        types = pred_instances.keypoint_types[0]
+
+        kpts_31 = np.zeros((31, 3))
+        kpts_31[:, :2] = keypoints
+        kpts_31[:, 2] = 1
+        return kpts_31, types
+
 def read_kpts_annotation(image_path, annotation_path):
     with open(annotation_path, 'r') as f:
         coco_data = json.load(f)
