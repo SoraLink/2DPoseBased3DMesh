@@ -15,14 +15,13 @@ from dashscope.aigc.image_generation import ImageGeneration
 from dashscope.api_entities.dashscope_response import Message
 
 from image_ops import ImageProcessor
+
 from pose_extractor import PoseExtractor
 
-# from pose_extractor import PoseExtractor
+_original_load = torch.load
+torch.load = lambda *args, **kwargs: _original_load(*args, **kwargs, weights_only=False) if 'weights_only' not in kwargs else _original_load(*args, **kwargs)
 
-# _original_load = torch.load
-# torch.load = lambda *args, **kwargs: _original_load(*args, **kwargs, weights_only=False) if 'weights_only' not in kwargs else _original_load(*args, **kwargs)
-
-# dashscope.base_http_api_url = 'https://dashscope-intl.aliyuncs.com/api/v1'
+dashscope.base_http_api_url = 'https://dashscope-intl.aliyuncs.com/api/v1'
 dashscope.api_key = os.getenv("DASHSCOPE_API_KEY")
 
 class LimbCompositingAgent:
@@ -100,14 +99,14 @@ class LimbCompositingAgent:
         # 格式: res_id: (downstream_id, limb_name, body_part_type)
         # 注意顺序：先排查近端(肘上/膝上)，再排查远端(肘下/膝下)，方便同侧肢体去重
         res_mapping = {
-            23: (7, '手臂', 'upper'),  # 左肘上残端 -> 探查 左肘(7)
-            24: (8, '手臂', 'upper'),  # 右肘上残端 -> 探查 右肘(8)
-            27: (13, '腿部', 'lower'),  # 左膝上残端 -> 探查 左膝(13)
-            28: (14, '腿部', 'lower'),  # 右膝上残端 -> 探查 右膝(14)
-            25: (9, '手臂', 'upper'),  # 左肘下残端 -> 探查 左腕(9)
-            26: (10, '手臂', 'upper'),  # 右肘下残端 -> 探查 右腕(10)
-            29: (15, '腿部', 'lower'),  # 左膝下残端 -> 探查 左踝(15)
-            30: (16, '腿部', 'lower')  # 右膝下残端 -> 探查 右踝(16)
+            23: (17, '手臂', 'upper'),  # 左肘上残端 -> 探查 左手尖(17)
+            24: (18, '手臂', 'upper'),  # 右肘上残端 -> 探查 右手尖(18)
+            27: (21, '腿部', 'lower'),  # 左膝上残端 -> 探查 左脚尖(21)
+            28: (22, '腿部', 'lower'),  # 右膝上残端 -> 探查 右脚尖(22)
+            25: (17, '手臂', 'upper'),  # 左肘下残端 -> 探查 左手尖(17)
+            26: (18, '手臂', 'upper'),  # 右肘下残端 -> 探查 右手尖(18)
+            29: (21, '腿部', 'lower'),  # 左膝下残端 -> 探查 左脚尖(21)
+            30: (22, '腿部', 'lower')  # 右膝下残端 -> 探查 右脚尖(22)
         }
 
         defects_found = []
@@ -129,15 +128,17 @@ class LimbCompositingAgent:
                     # 如果 downstream_id 越界，兜底当做缺失(type=2)处理
                     downstream_type = kpt_types[downstream_id] if downstream_id < len(kpt_types) else 2
 
+                    end_part = "手" if limb_name == "手臂" else "脚"
+
                     if downstream_type == 1:
                         # 场景 A：带有假肢
                         defects_found.append(
-                            f"将{defect_key}的假肢/义肢完全替换为具有完美解剖结构的真实正常肢体（包含末端的手/脚）"
+                            f"将{defect_key}的假肢/义肢完全替换为具有完美解剖结构的真实正常肢体（包含末端的{end_part}）"
                         )
                     else:
                         # 场景 B：缺失/空荡 (type == 2，或者存在其他异常标记兜底)
                         defects_found.append(
-                            f"沿着{defect_key}的残肢端点方向自然延伸，补全为具有完美解剖结构的完整{limb_name}（包含末端的手/脚）。"
+                            f"沿着{defect_key}的残肢端点方向自然延伸，补全为具有完美解剖结构的完整{limb_name}（包含末端的{end_part}）。"
                             f"【强烈注意】：绝对不要对{defect_key}现有的残肢部分进行任何像素改变、不要改变其原有的位置和方向"
                         )
 
@@ -401,8 +402,8 @@ class LimbCompositingAgent:
 
 
 if __name__ == "__main__":
-    image_dir = Path('./eval')
-    save_dir = Path('./workdir2')
+    image_dir = Path('./data/eval_seg_padded')
+    save_dir = Path('./workdir1')
 
     pose_extractor = PoseExtractor(
         config_file='./models/pose/vit_config.py',
@@ -451,5 +452,6 @@ if __name__ == "__main__":
                 continue
             # 传给 agent！
             agent.run(str(image_path), str(save_dir), current_image_annotation)
+            break
         else:
             print(f"⚠️ 警告: JSON 中没有找到图片 {img_name} 的关联标注，跳过该图。")
