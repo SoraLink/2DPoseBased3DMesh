@@ -275,7 +275,7 @@ class LimbCompositingAgent:
             # =========================================================
             # 核心改动 2：无论第几次尝试，永远传入【原图】 + 【Master Prompt】
             # =========================================================
-            gen_image_path = self.generate_full_image(image_path, save_dir, prompt=master_prompt)
+            gen_image_path = self.generate_full_image(image_path, save_dir, master_prompt, iter)
 
             if not gen_image_path:
                 print("❌ 图片生成失败，跳过本次重试。")
@@ -344,7 +344,7 @@ class LimbCompositingAgent:
         # cv2.imwrite(final_path, current_canvas)
         # return final_path
 
-    def generate_full_image(self, image_path, save_dir, prompt):
+    def generate_full_image(self, image_path, save_dir, prompt, iter):
         """
         调用 Qwen 大模型，让它自由发挥补全肢体（生成素材库）。
         """
@@ -384,7 +384,7 @@ class LimbCompositingAgent:
                                 path = ImageProcessor.save_image_from_url(
                                     content['image'],
                                     'compositing_material',
-                                    'raw_gen',
+                                    iter,
                                     save_dir
                                 )
                                 return path
