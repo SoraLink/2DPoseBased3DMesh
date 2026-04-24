@@ -1,4 +1,5 @@
 import os
+from pathlib import Path
 
 from main_pipeline import calculate_miou
 from pose_extractor import read_kpts_annotation
@@ -520,9 +521,22 @@ def main(ori_image_path, gen_image_path,reconstructor, annotation_file):
         mpjpe_residual = calculate_2d_mpjpe(pred_joints_3d, kpts_orig, global_cam, RES_MAPPING)
         print(f"📊 [量化评估] 完整关节 2D MPJPE: {mpjpe_intact:.2f} pixels")
         print(f"📊 [量化评估] 残肢端点 2D MPJPE: {mpjpe_residual:.2f} pixels")
+        return miou_score, mpjpe_intact, mpjpe_residual
 
 if __name__ == "__main__":
     reconstructor = ReconstructionEngine()
-    gen_image_path = './workdir1/bing_義足のランナー_6068/final.png'
-    ori_image_path = './data/eval_seg_padded/bing_義足のランナー_6068.png'
-    main(ori_image_path, gen_image_path, reconstructor, annotation_file='./data/filtered_annotations_padded_png.json')
+    workdir = Path('./workdir1')
+    dirs = workdir.glob('*')
+    miou = 0
+    mpjpe_intact = 0
+    mpjpe_residual = 0
+    for dir in dirs:
+        gen_image_path = dir / 'final.png'
+        ori_image_path = f'./data/eval_seg_padded/{dir.name}.png'
+        current_miou, current_intact, current_residual = main(ori_image_path, gen_image_path, reconstructor, annotation_file='./data/filtered_annotations_padded_png.json')
+        miou += current_miou
+        mpjpe_intact += current_intact
+        mpjpe_residual += current_residual
+    print(f"\n📈 [最终平均评估] 平均 mIoU: {miou/len(dirs):.4f}")
+    print(f"📈 [最终平均评估] 平均完整关节 2D MPJPE: {mpjpe_intact/len(dirs):.2f} pixels")
+    print(f"📈 [最终平均评估] 平均残肢端点 2D MPJPE: {mpjpe_residual/len(dirs):.2f} pixels")
