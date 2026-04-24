@@ -531,7 +531,20 @@ if __name__ == "__main__":
     mpjpe_intact = 0
     mpjpe_residual = 0
     for dir in dirs:
-        gen_image_path = dir / 'final.png'
+        image_folder = Path(dir)
+
+        # --- 极简逻辑 ---
+        # 1. 拿到目录下所有文件，排除 final.png
+        # 只要是文件就全收进来，不管它是 .png, .jpg 还是其他
+        all_files = [str(p) for p in image_folder.iterdir() if p.is_file() and p.name != 'final.png']
+
+        if not all_files:
+            raise FileNotFoundError(f"目录 {dir} 是空的，没找到素材。")
+
+        # 2. 字母序排序
+        all_files.sort()
+        # 3. 取最后一张
+        gen_image_path = all_files[-1]
         ori_image_path = f'./data/eval_seg_padded/{dir.name}.png'
         current_miou, current_intact, current_residual = main(ori_image_path, gen_image_path, reconstructor, annotation_file='./data/filtered_annotations_padded_png.json')
         miou += current_miou
