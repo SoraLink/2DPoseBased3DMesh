@@ -479,7 +479,7 @@ def main(ori_image_path, gen_image_path,reconstructor, annotation_file):
         mesh_save_path, pred_joints_3d, pred_cam = reconstructor.predict_mesh(ori_image_path, mesh_save_path)
     except Exception as e:
         print(e)
-        continue
+        return 0, 0 ,0
     cut_tasks = []
     for i in range(23, 31):
         # 判断: 只有 type == 0 才是有效残肢点，且确保坐标数组够长
