@@ -475,7 +475,7 @@ def main(ori_image_path, gen_image_path,reconstructor, annotation_file):
     kpts_orig, kpts, types_orig = read_kpts_annotation(ori_image_path, annotation_file)
     dir_name = os.path.dirname(temp_gen_path)
     mesh_save_path = os.path.join(dir_name, "whole_body_mesh.obj")
-    mesh_save_path, pred_joints_3d, pred_cam = reconstructor.predict_mesh(temp_gen_path, mesh_save_path)
+    mesh_save_path, pred_joints_3d, pred_cam = reconstructor.predict_mesh(ori_image_path, mesh_save_path)
     cut_tasks = []
     for i in range(23, 31):
         # 判断: 只有 type == 0 才是有效残肢点，且确保坐标数组够长
@@ -517,7 +517,7 @@ def main(ori_image_path, gen_image_path,reconstructor, annotation_file):
             'focal': global_focal,
             'princpt': np.array([global_cx, global_cy])
         }
-        orig_proj_path, pred_mask_orig, gen_proj_path, pred_mask_gen = project_mesh_overlay(ori_image_path, temp_gen_path, mesh, global_cam, dir_name)
+        orig_proj_path, pred_mask_orig, gen_proj_path, pred_mask_gen = project_mesh_overlay(ori_image_path, ori_image_path, mesh, global_cam, dir_name)
         mask_gt = load_gt_mask(ori_image_path)
         miou_score = calculate_miou(pred_mask_orig, mask_gt)
         print(f"      -> miou_score: {miou_score:.4f}")
