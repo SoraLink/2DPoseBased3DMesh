@@ -70,10 +70,12 @@ class LimbCompositingAgent:
                 })
         return rules
 
-    def evaluate_image(self, image_path, kpts, kpt_types):
+    def generate_prompt(self, image_path, kpts, kpt_types):
         """
         评估图片是否存在残肢。
-        通过检测下游关键点类型(type 1=假肢, 2=缺失)，动态生成针对性的修复 Prompt。
+        基于确定的缺陷类型，同时生成：
+        1. 给修复模型的精准 Master Prompt
+        2. 给复查裁判的专属 VLM Instruction (绝不含糊其辞)
         """
         img = cv2.imread(image_path)
         if img is None:
@@ -95,59 +97,60 @@ class LimbCompositingAgent:
         lower_xs = [x for x in (lh_x, rh_x) if x is not None]
         lower_center_x = sum(lower_xs) / len(lower_xs) if lower_xs else fallback_center_x
 
-        # --- 核心映射关系表 ---
-        # 格式: res_id: (downstream_id, limb_name, body_part_type)
-        # 注意顺序：先排查近端(肘上/膝上)，再排查远端(肘下/膝下)，方便同侧肢体去重
         res_mapping = {
-            23: (17, '手臂', 'upper'),  # 左肘上残端 -> 探查 左手尖(17)
-            24: (18, '手臂', 'upper'),  # 右肘上残端 -> 探查 右手尖(18)
-            27: (21, '腿部', 'lower'),  # 左膝上残端 -> 探查 左脚尖(21)
-            28: (22, '腿部', 'lower'),  # 右膝上残端 -> 探查 右脚尖(22)
-            25: (17, '手臂', 'upper'),  # 左肘下残端 -> 探查 左手尖(17)
-            26: (18, '手臂', 'upper'),  # 右肘下残端 -> 探查 右手尖(18)
-            29: (21, '腿部', 'lower'),  # 左膝下残端 -> 探查 左脚尖(21)
-            30: (22, '腿部', 'lower')  # 右膝下残端 -> 探查 右脚尖(22)
+            23: (17, '手臂', 'upper'),
+            24: (18, '手臂', 'upper'),
+            27: (21, '腿部', 'lower'),
+            28: (22, '腿部', 'lower'),
+            25: (17, '手臂', 'upper'),
+            26: (18, '手臂', 'upper'),
+            29: (21, '腿部', 'lower'),
+            30: (22, '腿部', 'lower')
         }
 
         defects_found = []
+        vlm_checks = []  # 专门存放精准的验收标准
         defect_parts_set = set()
 
         for res_id, (downstream_id, limb_name, body_part_type) in res_mapping.items():
-            # 1. 如果发现了生物性的残肢断点
             if res_id < len(kpt_types) and kpt_types[res_id] == 0:
                 res_x = kpts[res_id][0]
                 ref_center_x = upper_center_x if body_part_type == 'upper' else lower_center_x
                 screen_side = "画面左侧" if res_x < ref_center_x else "画面右侧"
                 defect_key = f"{screen_side}的{limb_name}"
 
-                # 同一个肢体只发出一道指令（比如左臂找到了肘上残肢，就忽略肘下残肢的重复判断）
                 if defect_key not in defect_parts_set:
                     defect_parts_set.add(defect_key)
 
-                    # 2. 探测下游关节的 Type，判断是假肢还是缺失
-                    # 如果 downstream_id 越界，兜底当做缺失(type=2)处理
                     downstream_type = kpt_types[downstream_id] if downstream_id < len(kpt_types) else 2
 
+                    # 动态明确末端名称，杜绝“手/脚”
                     end_part = "手" if limb_name == "手臂" else "脚"
 
                     if downstream_type == 1:
-                        # 场景 A：带有假肢
+                        # 明确已知是假肢
                         defects_found.append(
                             f"将{defect_key}的假肢/义肢完全替换为具有完美解剖结构的真实正常肢体（包含末端的{end_part}）"
                         )
+                        vlm_checks.append(
+                            f"- 【{defect_key}】：必须确认原有的假肢或义肢已被彻底移除，并替换为真实的血肉肢体，且包含完整的{end_part}。如果该部位依然能看到任何机械、碳纤维等假肢痕迹，则算作不合格。"
+                        )
                     else:
-                        # 场景 B：缺失/空荡 (type == 2，或者存在其他异常标记兜底)
+                        # 明确已知是缺失断肢
                         defects_found.append(
                             f"沿着{defect_key}的残肢端点方向自然延伸，补全为具有完美解剖结构的完整{limb_name}（包含末端的{end_part}）。"
                             f"【强烈注意】：绝对不要对{defect_key}现有的残肢部分进行任何像素改变、不要改变其原有的位置和方向"
                         )
+                        vlm_checks.append(
+                            f"- 【{defect_key}】：必须确认残缺部分已经被自然延伸并补全，且末端包含完整的{end_part}。如果该部位依然呈现为断肢、或者延伸部分缺失了{end_part}，则算作不合格。"
+                        )
 
-        # 生成最终报告和 Master Prompt
         if not defects_found:
             return {
                 "passed": True,
                 "reason": "未检测到生物性残肢断点，无需补全。",
-                "prompt": ""
+                "prompt": "",
+                "eval_instruction": ""
             }
         else:
             defect_desc = "；并且，".join(defects_found)
@@ -156,10 +159,24 @@ class LimbCompositingAgent:
                 f"【全局绝对指令】：只允许对上述明确指定的缺陷部位进行处理！绝对不要移动、修改或重绘任何现有的健全肢体、躯干、脸部以及背景环境！必须保持原图人物主体动作和画风完全不变。"
             )
 
+            # 将精准的验收标准组装给大模型
+            vlm_checks_str = "\n".join(vlm_checks)
+            eval_instruction = (
+                f"[任务: 确认特定缺陷部位是否完美修复]\n"
+                f"请严格按照以下标准，检查图片中的特定部位：\n"
+                f"{vlm_checks_str}\n\n"
+                f"输出必须严格按照JSON格式:\n"
+                f"{{\n"
+                f"    \"passed\": true/false,\n"
+                f"    \"reason\": \"详细描述你观察到的上述被检部位的当前状态，明确说明其是否满足了上述通过标准。\"\n"
+                f"}}"
+            )
+
             return {
                 "passed": False,
-                "reason": f"检测到异常部位：{', '.join(defect_parts_set)}",
-                "prompt": repair_prompt
+                "reason": f"检测到异常部位：{'、'.join(defect_parts_set)}",
+                "prompt": repair_prompt,
+                "eval_instruction": eval_instruction
             }
 
     def generate_pure_extraction_mask(self, image_shape, kpts_gen, anchor_idx, downstream_indices, bbox):
@@ -229,6 +246,65 @@ class LimbCompositingAgent:
 
         return final_img
 
+    def evaluate_image(self, image_path, prompt):
+        print(f"👁️ [复查] 召唤视觉大模型 {self.eval_model} 担任裁判...")
+
+        # 1. 编码图片 (由于 DashScope 多模态支持 file:// 协议，如果 ImageProcessor 返回的是 base64 也可以直接用)
+        image_encoded = ImageProcessor.encode_file(image_path)
+
+        messages = [
+            {
+                "role": "user",
+                "content": [
+                    {"image": image_encoded},
+                    {"text": prompt}
+                ]
+            }
+        ]
+
+        api_attempt = 0
+        while api_attempt < 3:
+            try:
+                # 调用多模态视觉模型
+                response = MultiModalConversation.call(
+                    model=self.eval_model,
+                    messages=messages,
+                )
+
+                if response.status_code == 200:
+                    # DashScope 多模态返回的 content 通常是一个包含 dict 的 list
+                    raw_content = response.output.choices[0].message.content
+                    text_result = ""
+                    if isinstance(raw_content, list):
+                        for item in raw_content:
+                            if 'text' in item:
+                                text_result += item['text']
+                    else:
+                        text_result = str(raw_content)
+
+                    # 鲁棒解析 JSON (防止大模型加上 ```json 等 markdown 标记)
+                    json_match = re.search(r'\{.*\}', text_result, re.DOTALL)
+                    if json_match:
+                        result_dict = json.loads(json_match.group())
+                        # 确保 key 存在
+                        if "passed" in result_dict:
+                            return result_dict
+
+                    print(f"⚠️ VLM 裁判返回格式异常，未找到合法的 JSON。原始输出: {text_result}")
+                    raise ValueError("JSON parse failed")
+
+                else:
+                    sleep(3)
+                    raise RuntimeError(f"VLM API 调用失败: {response.code} - {response.message}")
+
+            except Exception as e:
+                api_attempt += 1
+                print(f"⚠️ VLM 裁判开小差了 (重试 {api_attempt}/3): {str(e)}")
+                time.sleep(2)
+
+        # 兜底：如果 API 彻底挂了，默认让它重画
+        return {"passed": False, "reason": "VLM 裁判多次调用失败，默认复查不通过。"}
+
     def run(self, image_path, base_output_dir, original_annotation, max_attempts=3):
         print("\n" + "=" * 50)
         print(f"🔪 启动骨架刻刀再植流水线 (Clean Logic)")
@@ -258,10 +334,10 @@ class LimbCompositingAgent:
         kpt_types_orig = original_annotation.get("keypoint_types", [])
         kpts_orig = np.array(original_annotation["keypoints"]).reshape(-1, 3)
 
-        orig_eval_res = self.evaluate_image(image_path, kpts_orig, kpt_types_orig)
+        res = self.generate_prompt(image_path, kpts_orig, kpt_types_orig)
 
-        master_prompt = orig_eval_res['prompt']
-        print(f"📋 初诊发现缺陷，生成全局修改指令: {orig_eval_res['reason']}")
+        master_prompt = res['prompt']
+        print(f"📋 初诊发现缺陷，生成全局修改指令: {res['reason']}")
         print(f"📝 Master Prompt: {master_prompt}")
 
         # 获取切图规则
@@ -275,7 +351,7 @@ class LimbCompositingAgent:
             # =========================================================
             # 核心改动 2：无论第几次尝试，永远传入【原图】 + 【Master Prompt】
             # =========================================================
-            gen_image_path = self.generate_full_image(image_path, save_dir, master_prompt, iter)
+            gen_image_path = self.generate_full_image(image_path, save_dir, master_prompt, str(attempt))
 
             if not gen_image_path:
                 print("❌ 图片生成失败，跳过本次重试。")
@@ -285,9 +361,8 @@ class LimbCompositingAgent:
             # 核心改动 3：对【生成的新图】进行姿态提取和“复查”
             # =========================================================
             # 注意：这里必须提取生成图的 kpts！不能用原图的！
-            kpts_gen, kpt_types_gen = self.pose_extractor.extract_keypoints(gen_image_path)  # 假设你有这个方法
 
-            gen_eval_res = self.evaluate_image(gen_image_path, kpts_gen, kpt_types_gen)
+            gen_eval_res = self.evaluate_image(gen_image_path, res['eval_instruction'])
 
             print(f"📊 复查评估: {'✅ 通过' if gen_eval_res['passed'] else '❌ 未通过'}")
 
