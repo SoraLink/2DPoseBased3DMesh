@@ -535,13 +535,15 @@ def main(ori_image_path, gen_image_path,reconstructor, annotation_file):
     target_h, target_w = int(target_h / 3), int(target_w / 3)
 
     image_ori_temp = cv2.resize(img_ori_temp, (target_w, target_h), interpolation=cv2.INTER_AREA)
-    temp_ori_path = ori_image_path.replace(".png", "_resized.png")
+    base_name, ext = os.path.splitext(ori_image_path)
+    temp_ori_path = f"{base_name}_resized{ext}"
     cv2.imwrite(temp_ori_path, image_ori_temp)
     ori_image_path = temp_ori_path
 
     img_gen_temp = cv2.imread(gen_image_path)
     img_gen_resized = cv2.resize(img_gen_temp, (target_w, target_h), interpolation=cv2.INTER_AREA)
-    temp_gen_path = gen_image_path.replace(".jpg", "_resized.jpg")
+    base_name, ext = os.path.splitext(gen_image_path)
+    temp_gen_path = f"{base_name}_resized{ext}"
     cv2.imwrite(temp_gen_path, img_gen_resized)
 
     dir_name = os.path.dirname(temp_gen_path)
