@@ -312,6 +312,52 @@ class ResidualMeshCutter2:
         closest_pts = bone_start + np.outer(proj, bone_dir)
         return np.linalg.norm(vertices - closest_pts, axis=1)
 
+    def _get_closest_point_ray_to_bone(self, pt_2d, bone_start_3d, bone_end_3d):
+        """
+        🚀 射线-骨骼求交法 (Ray-Casting)
+        计算 2D 像素射线与 3D 骨骼线段之间的最近点（公垂线点），并强制 Clip 在线段内。
+        """
+        # 1. 构建从相机光心穿过 2D 标注点的 3D 射线 (Ray)
+        u, v = pt_2d
+        ray_dir = np.array([(u - self.cx) / self.fx, (v - self.cy) / self.fy, 1.0])
+        ray_dir = ray_dir / np.linalg.norm(ray_dir)
+        ray_origin = self.cam_origin  # np.array([0.0, 0.0, 0.0])
+
+        # 2. 骨骼线段方向 (Line Segment)
+        bone_vec = bone_end_3d - bone_start_3d
+
+        # 3. 计算 3D 空间中两条直线的最短距离点 (数学公垂线公式)
+        w0 = bone_start_3d - ray_origin
+        a = np.dot(ray_dir, ray_dir)  # 恒为 1.0
+        b = np.dot(ray_dir, bone_vec)
+        c = np.dot(bone_vec, bone_vec)
+        d = np.dot(ray_dir, w0)
+        e = np.dot(bone_vec, w0)
+
+        denom = a * c - b * b
+
+        if denom < 1e-6:
+            # 射线和骨骼平行（极小概率事件），默认取中间
+            t = 0.5
+        else:
+            # t 是落在 3D 骨骼线段上的比例参数
+            t = (a * e - b * d) / denom
+
+        # 4. 🛡️ 强制安全锁：Clip 限制
+        # 预留 5% 缓冲区，防止 t=0 或 1 时刚好切在关节点上导致 Mesh 破洞或撕裂
+        t_clipped = np.clip(t, 0.05, 0.95)
+
+        # 5. 计算出绝对安全的 3D 切点
+        safe_cut_origin = bone_start_3d + t_clipped * bone_vec
+
+        # 可选：计算射线和骨骼的最短物理误差距离
+        # s 是落在射线上的参数
+        s = (b * e - c * d) / denom if denom >= 1e-6 else 0
+        point_on_ray = ray_origin + s * ray_dir
+        physical_error_dist = np.linalg.norm(safe_cut_origin - point_on_ray)
+
+        return safe_cut_origin, physical_error_dist
+
     def process_multiple_cuts(self, mesh_path, cut_tasks):
         """
         执行多处截肢任务，Watertight 封口，并强制生成抛物线生理鼓包
@@ -328,11 +374,12 @@ class ResidualMeshCutter2:
             # print(f"   -> 处理部位: {part_name}")
 
             # 直接计算 Lambda，不再进行坐标转换
-            lambda_cut = self._calculate_exact_cut_proportion_2d_driven(
+            cut_origin, error_dist = self._get_closest_point_ray_to_bone(
                 task['pt_2d'], task['start_3d'], task['end_3d']
             )
 
-            cut_origin = task['start_3d'] + lambda_cut * (task['end_3d'] - task['start_3d'])
+            if error_dist > 0.2:
+                print(f"⚠️ 警告: 部位 {part_name} HMR 预测空间偏差较大 (距离: {error_dist:.2f}m)，已强制对其执行安全截断。")
             # 法线指向要切掉的方向（指向末端）
             cut_normal = task['start_3d'] - task['end_3d']
             cut_normal = cut_normal / np.linalg.norm(cut_normal)
@@ -517,6 +564,9 @@ def main(ori_image_path, gen_image_path,reconstructor, annotation_file):
             mesh_path=mesh_save_path,
             cut_tasks=cut_tasks,
         )
+        for task in cut_tasks:
+            if 'cut_origin' in task:
+                pred_joints_3d[task['name']] = task['cut_origin']
         global_cam = {
             'focal': global_focal,
             'princpt': np.array([global_cx, global_cy])
