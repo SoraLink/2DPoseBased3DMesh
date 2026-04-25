@@ -551,7 +551,7 @@ def main(ori_image_path, gen_image_path,reconstructor, annotation_file):
 
     try:
         mesh_save_path, pred_joints_3d, pred_cam, mesh = reconstructor.predict_mesh(temp_gen_path, mesh_save_path)
-    except Exception as e:  # 建议抓取通用 Exception 兜底
+    except SystemExit as e:  # 建议抓取通用 Exception 兜底
         print(e)
         return 0, 0, 0
     global_focal = pred_cam['focal']
