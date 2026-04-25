@@ -378,12 +378,12 @@ class ResidualMeshCutter2:
             # print(f"   -> 处理部位: {part_name}")
 
             # 直接计算 Lambda，不再进行坐标转换
-            cut_origin, error_dist = self._get_closest_point_ray_to_bone(
+            cut_origin= self._calculate_exact_cut_proportion_2d_driven(
                 task['pt_2d'], task['start_3d'], task['end_3d']
             )
 
-            if error_dist > 0.2:
-                print(f"⚠️ 警告: 部位 {part_name} HMR 预测空间偏差较大 (距离: {error_dist:.2f}m)，已强制对其执行安全截断。")
+            # if error_dist > 0.2:
+            #     print(f"⚠️ 警告: 部位 {part_name} HMR 预测空间偏差较大 (距离: {error_dist:.2f}m)，已强制对其执行安全截断。")
             # 法线指向要切掉的方向（指向末端）
             cut_normal = task['start_3d'] - task['end_3d']
             cut_normal = cut_normal / np.linalg.norm(cut_normal)
