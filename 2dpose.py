@@ -2,7 +2,13 @@ import os
 import cv2
 import numpy as np
 from pathlib import Path
+
+import torch
+
 from pose_extractor import PoseExtractor, read_kpts_annotation
+
+_original_load = torch.load
+torch.load = lambda *args, **kwargs: _original_load(*args, **kwargs, weights_only=False) if 'weights_only' not in kwargs else _original_load(*args, **kwargs)
 
 def main(ori_image_path, gen_image_path, pose_extractor, annotation_file=None):
     # 1. 读取原图 Ground Truth 标注
