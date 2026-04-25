@@ -122,7 +122,7 @@ METAINFO = {
 }
 
 
-def project_mesh_overlay(image_path, gen_image_path, mesh, global_cam, output_dir):
+def project_mesh_overlay(image_path, gen_image_path, mesh, global_cam, output_dir, is_full=False):
     """
     因为 Gen 和 Orig 已完全对齐，直接使用统一相机内参进行投影
     """
@@ -189,8 +189,12 @@ def project_mesh_overlay(image_path, gen_image_path, mesh, global_cam, output_di
         return out_path, mask
 
     # 5. 分别对 Gen 图和 Orig 图生成投影
-    gen_out_path, mask_gen = render_overlay(gen_image_path, "gen_projection")
-    orig_out_path, mask_orig = render_overlay(image_path, "orig_projection")
+    if is_full:
+        gen_out_path, mask_gen = render_overlay(gen_image_path, "gen_projection_full")
+        orig_out_path, mask_orig = render_overlay(image_path, "orig_projection_full")
+    else:
+        gen_out_path, mask_gen = render_overlay(gen_image_path, "gen_projection")
+        orig_out_path, mask_orig = render_overlay(image_path, "orig_projection")
 
     return orig_out_path, mask_orig, gen_out_path, mask_gen
 
@@ -523,10 +527,18 @@ def main(ori_image_path, gen_image_path,reconstructor, annotation_file):
     dir_name = os.path.dirname(temp_gen_path)
     mesh_save_path = os.path.join(dir_name, "whole_body_mesh.obj")
     try:
-        mesh_save_path, pred_joints_3d, pred_cam = reconstructor.predict_mesh(temp_gen_path, mesh_save_path)
+        mesh_save_path, pred_joints_3d, pred_cam, mesh = reconstructor.predict_mesh(temp_gen_path, mesh_save_path)
     except SystemExit as e:
         print(e)
         return 0, 0 ,0
+    global_focal = pred_cam['focal']
+    global_cx = pred_cam['princpt'][0]
+    global_cy = pred_cam['princpt'][1]
+    global_cam = {
+        'focal': global_focal,
+        'princpt': np.array([global_cx, global_cy])
+    }
+    project_mesh_overlay(ori_image_path, temp_gen_path, mesh, global_cam, dir_name)
     cut_tasks = []
     for i in range(23, 31):
         # 判断: 只有 type == 0 才是有效残肢点，且确保坐标数组够长
@@ -571,7 +583,7 @@ def main(ori_image_path, gen_image_path,reconstructor, annotation_file):
             'focal': global_focal,
             'princpt': np.array([global_cx, global_cy])
         }
-        orig_proj_path, pred_mask_orig, gen_proj_path, pred_mask_gen = project_mesh_overlay(ori_image_path, ori_image_path, mesh, global_cam, dir_name)
+        orig_proj_path, pred_mask_orig, gen_proj_path, pred_mask_gen = project_mesh_overlay(ori_image_path, temp_gen_path, mesh, global_cam, dir_name)
         mask_gt = load_gt_mask(ori_image_path)
         miou_score = calculate_miou(pred_mask_orig, mask_gt)
         print(f"      -> miou_score: {miou_score:.4f}")

@@ -123,4 +123,4 @@ class ReconstructionEngine:
             'right_ear': vertices[349],
         }
 
-        return save_path, pred_joints_dict, res['global_cam']
+        return save_path, pred_joints_dict, res['global_cam'], mesh_obj
