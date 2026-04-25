@@ -522,6 +522,12 @@ def load_gt_mask(image_path):
     return mask
 
 def main(ori_image_path, gen_image_path,reconstructor, annotation_file):
+    kpts_orig, kpts, types_orig = read_kpts_annotation(ori_image_path, annotation_file)
+
+    for i in range(len(kpts_orig)):
+        kpts_orig[i][0] /= 3.0  # x 坐标缩小
+        kpts_orig[i][1] /= 3.0  # y 坐标缩小
+
     img_ori_temp = cv2.imread(ori_image_path)
     target_h, target_w = img_ori_temp.shape[:2]
 
@@ -537,13 +543,6 @@ def main(ori_image_path, gen_image_path,reconstructor, annotation_file):
     img_gen_resized = cv2.resize(img_gen_temp, (target_w, target_h), interpolation=cv2.INTER_AREA)
     temp_gen_path = gen_image_path.replace(".jpg", "_resized.jpg")
     cv2.imwrite(temp_gen_path, img_gen_resized)
-
-    kpts_orig, kpts, types_orig = read_kpts_annotation(ori_image_path, annotation_file)
-
-    # 🌟 修复 2：同步将 2D GT 标注点的坐标缩小 1/3
-    for i in range(len(kpts_orig)):
-        kpts_orig[i][0] /= 3.0  # x 坐标缩小
-        kpts_orig[i][1] /= 3.0  # y 坐标缩小
 
     dir_name = os.path.dirname(temp_gen_path)
     mesh_save_path = os.path.join(dir_name, "whole_body_mesh.obj")
