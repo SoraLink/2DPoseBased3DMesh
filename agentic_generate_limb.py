@@ -548,6 +548,5 @@ if __name__ == "__main__":
             #     continue
             # 传给 agent！
             agent.run(str(image_path), str(save_dir), current_image_annotation)
-            break
         else:
             print(f"⚠️ 警告: JSON 中没有找到图片 {img_name} 的关联标注，跳过该图。")
