@@ -84,7 +84,7 @@ if __name__ == "__main__":
     # 提前转为 list
     dirs = list(workdir.glob('*'))
 
-    miou = 0
+    # miou = 0  <-- 不再需要统计 mIoU
     mpjpe_intact = 0
     mpjpe_residual = 0
     valid_count = 0  # 🌟 必须加上有效计数器
@@ -105,3 +105,34 @@ if __name__ == "__main__":
 
         result = main(ori_image_path, gen_image_path, pose_extractor,
                       annotation_file='./data/filtered_annotations_padded_png.json')
+
+        # ==========================================
+        # 🌟 补全的统计与聚合逻辑
+        # ==========================================
+
+        # 1. 检查是否预测失败
+        if result == (0, 0, 0):
+            print(f"❌ {dir_path.name} 预测失败，跳过统计。")
+            bad_images.append(dir_path.name)  # 把崩溃的样本记录下来
+            continue
+
+        # 2. 拆包接收返回值 (丢弃第一个占位的 0.0)
+        _, current_intact, current_residual = result
+
+        # 3. 累加误差并增加有效计数
+        mpjpe_intact += current_intact
+        mpjpe_residual += current_residual
+        valid_count += 1
+
+        # ==========================================
+    # 🌟 最终平均评估打印
+    # ==========================================
+    if valid_count > 0:
+        print(f"\n📈 [纯 2D Pose 基准评估 | 有效样本: {valid_count}/{len(dirs)}]")
+        print(f"   平均完整关节 2D MPJPE: {mpjpe_intact / valid_count:.2f} pixels")
+        print(f"   平均残肢端点 2D MPJPE: {mpjpe_residual / valid_count:.2f} pixels")
+
+        if bad_images:
+            print(f"\n🚨 预测崩溃的 Bad images: {bad_images}")
+    else:
+        print("\n💥 整个数据集均处理失败，有效样本为 0。")
