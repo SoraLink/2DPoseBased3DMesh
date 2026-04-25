@@ -392,7 +392,12 @@ class LimbCompositingAgent:
         all_files.sort()
         # 3. 取最后一张
         gen_image_path = all_files[-1]
-
+        target_h, target_w = orig_bgr.shape[:2]
+        img_gen_temp = cv2.imread(gen_image_path)
+        img_gen_resized = cv2.resize(img_gen_temp, (target_w, target_h), interpolation=cv2.INTER_AREA)
+        temp_gen_path = gen_image_path.replace(".png", "_resized.png")
+        cv2.imwrite(temp_gen_path, img_gen_resized)
+        gen_image_path = temp_gen_path
         print(f"🎯 选定融合素材: {gen_image_path}")
         # 提取生成图关键点和 bbox
         kpts_gen = self.pose_extractor.extract_31_keypoints(gen_image_path)
