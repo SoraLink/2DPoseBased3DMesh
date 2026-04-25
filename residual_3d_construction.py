@@ -523,7 +523,7 @@ def main(ori_image_path, gen_image_path,reconstructor, annotation_file):
     dir_name = os.path.dirname(temp_gen_path)
     mesh_save_path = os.path.join(dir_name, "whole_body_mesh.obj")
     try:
-        mesh_save_path, pred_joints_3d, pred_cam = reconstructor.predict_mesh(img_gen_resized, mesh_save_path)
+        mesh_save_path, pred_joints_3d, pred_cam = reconstructor.predict_mesh(temp_gen_path, mesh_save_path)
     except SystemExit as e:
         print(e)
         return 0, 0 ,0
