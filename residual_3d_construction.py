@@ -590,6 +590,7 @@ if __name__ == "__main__":
     miou = 0
     mpjpe_intact = 0
     mpjpe_residual = 0
+    bad_images = []
     for dir in dirs:
         image_folder = Path(dir)
 
@@ -608,6 +609,8 @@ if __name__ == "__main__":
         ori_image_path = f'./data/eval_seg_padded/{dir.name}.png'
         print(f'start to analyse image {gen_image_path}')
         current_miou, current_intact, current_residual = main(ori_image_path, gen_image_path, reconstructor, annotation_file='./data/filtered_annotations_padded_png.json')
+        if current_miou < 0.7:
+            bad_images.append(dir.name)
         miou += current_miou
         mpjpe_intact += current_intact
         mpjpe_residual += current_residual
@@ -615,3 +618,4 @@ if __name__ == "__main__":
     print(f"\n📈 [最终平均评估] 平均 mIoU: {miou/len(dirs):.4f}")
     print(f"📈 [最终平均评估] 平均完整关节 2D MPJPE: {mpjpe_intact/len(dirs):.2f} pixels")
     print(f"📈 [最终平均评估] 平均残肢端点 2D MPJPE: {mpjpe_residual/len(dirs):.2f} pixels")
+    print(f"bad images: {bad_images}")
