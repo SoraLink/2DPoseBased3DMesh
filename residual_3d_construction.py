@@ -524,18 +524,35 @@ def load_gt_mask(image_path):
 def main(ori_image_path, gen_image_path,reconstructor, annotation_file):
     img_ori_temp = cv2.imread(ori_image_path)
     target_h, target_w = img_ori_temp.shape[:2]
+
+    # 🌟 修复 1：强制转换为整数
+    target_h, target_w = int(target_h / 3), int(target_w / 3)
+
+    image_ori_temp = cv2.resize(img_ori_temp, (target_w, target_h), interpolation=cv2.INTER_AREA)
+    temp_ori_path = ori_image_path.replace(".png", "_resized.png")
+    cv2.imwrite(temp_ori_path, image_ori_temp)
+    ori_image_path = temp_ori_path
+
     img_gen_temp = cv2.imread(gen_image_path)
     img_gen_resized = cv2.resize(img_gen_temp, (target_w, target_h), interpolation=cv2.INTER_AREA)
-    temp_gen_path = gen_image_path.replace(".png", "_resized.png")
+    temp_gen_path = gen_image_path.replace(".jpg", "_resized.jpg")
     cv2.imwrite(temp_gen_path, img_gen_resized)
+
     kpts_orig, kpts, types_orig = read_kpts_annotation(ori_image_path, annotation_file)
+
+    # 🌟 修复 2：同步将 2D GT 标注点的坐标缩小 1/3
+    for i in range(len(kpts_orig)):
+        kpts_orig[i][0] /= 3.0  # x 坐标缩小
+        kpts_orig[i][1] /= 3.0  # y 坐标缩小
+
     dir_name = os.path.dirname(temp_gen_path)
     mesh_save_path = os.path.join(dir_name, "whole_body_mesh.obj")
+
     try:
         mesh_save_path, pred_joints_3d, pred_cam, mesh = reconstructor.predict_mesh(temp_gen_path, mesh_save_path)
-    except SystemExit as e:
+    except Exception as e:  # 建议抓取通用 Exception 兜底
         print(e)
-        return 0, 0 ,0
+        return 0, 0, 0
     global_focal = pred_cam['focal']
     global_cx = pred_cam['princpt'][0]
     global_cy = pred_cam['princpt'][1]
@@ -600,39 +617,57 @@ def main(ori_image_path, gen_image_path,reconstructor, annotation_file):
         print(f"📊 [量化评估] 残肢端点 2D MPJPE: {mpjpe_residual:.2f} pixels")
         return miou_score, mpjpe_intact, mpjpe_residual
 
+
 if __name__ == "__main__":
     reconstructor = ReconstructionEngine()
     workdir = Path('./workdir1')
-    dirs = workdir.glob('*')
+
+    # 提前转为 list
+    dirs = list(workdir.glob('*'))
+
     miou = 0
     mpjpe_intact = 0
     mpjpe_residual = 0
+    valid_count = 0  # 🌟 必须加上有效计数器
     bad_images = []
-    for dir in dirs:
-        image_folder = Path(dir)
 
-        # --- 极简逻辑 ---
-        # 1. 拿到目录下所有文件，排除 final.png
-        # 只要是文件就全收进来，不管它是 .png, .jpg 还是其他
+    for dir_path in dirs:
+        image_folder = Path(dir_path)
+
         all_files = [str(p) for p in image_folder.iterdir() if p.is_file() and p.name != 'final.png']
 
         if not all_files:
-            raise FileNotFoundError(f"目录 {dir} 是空的，没找到素材。")
+            continue
 
-        # 2. 字母序排序
         all_files.sort()
-        # 3. 取最后一张
         gen_image_path = all_files[-1]
-        ori_image_path = f'./data/eval_seg_padded/{dir.name}.png'
+        ori_image_path = f'./data/eval_seg_padded/{dir_path.name}.png'
         print(f'start to analyse image {gen_image_path}')
-        current_miou, current_intact, current_residual = main(ori_image_path, gen_image_path, reconstructor, annotation_file='./data/filtered_annotations_padded_png.json')
+
+        result = main(ori_image_path, gen_image_path, reconstructor,
+                      annotation_file='./data/filtered_annotations_padded_png.json')
+
+        # 🌟 跳过失败的预测，防止 0 误差污染平均值
+        if result == (0, 0, 0):
+            print(f"❌ {dir_path.name} 预测失败，跳过统计。")
+            continue
+
+        current_miou, current_intact, current_residual = result
+
         if current_miou < 0.7:
-            bad_images.append(dir.name)
+            bad_images.append(dir_path.name)
+
         miou += current_miou
         mpjpe_intact += current_intact
         mpjpe_residual += current_residual
-    dirs = list(workdir.glob('*'))
-    print(f"\n📈 [最终平均评估] 平均 mIoU: {miou/len(dirs):.4f}")
-    print(f"📈 [最终平均评估] 平均完整关节 2D MPJPE: {mpjpe_intact/len(dirs):.2f} pixels")
-    print(f"📈 [最终平均评估] 平均残肢端点 2D MPJPE: {mpjpe_residual/len(dirs):.2f} pixels")
-    print(f"bad images: {bad_images}")
+        valid_count += 1
+
+        # 🌟 用 valid_count 算平均值
+    if valid_count > 0:
+        print(f"\n📈 [最终平均评估] (有效样本: {valid_count}/{len(dirs)})")
+        print(f"   平均 mIoU: {miou / valid_count:.4f}")
+        print(f"   平均完整关节 2D MPJPE: {mpjpe_intact / valid_count:.2f} pixels")
+        print(f"   平均残肢端点 2D MPJPE: {mpjpe_residual / valid_count:.2f} pixels")
+        print(f"\n🚨 Bad images (mIoU < 0.7): {bad_images}")
+    else:
+        print("\n💥 整个数据集处理失败。")
