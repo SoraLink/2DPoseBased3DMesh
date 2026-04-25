@@ -477,7 +477,7 @@ def main(ori_image_path, gen_image_path,reconstructor, annotation_file):
     mesh_save_path = os.path.join(dir_name, "whole_body_mesh.obj")
     try:
         mesh_save_path, pred_joints_3d, pred_cam = reconstructor.predict_mesh(ori_image_path, mesh_save_path)
-    except Exception as e:
+    except SystemExit as e:
         print(e)
         return 0, 0 ,0
     cut_tasks = []
