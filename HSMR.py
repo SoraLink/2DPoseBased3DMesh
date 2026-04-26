@@ -1,126 +1,118 @@
+import sys
 import os
-import torch
-import numpy as np
 import cv2
-from pathlib import Path
+import numpy as np
+import trimesh
+import torch
 
-# 导入你提供的官方库组件
-from lib.modeling.pipelines.hsmr import build_inference_pipeline
-from lib.modeling.pipelines.vitdet import build_detector
-from lib.kits.hsmr_demo import imgs_det2patches, prepare_mesh
+# ==========================================
+# 1. 暴力注入 Meta 仓库路径（解决瞎子问题）
+# ==========================================
+REPO_ROOT = '/home/sora/workspace/sam-3d-body'
+if REPO_ROOT not in sys.path:
+    sys.path.insert(0, REPO_ROOT)
 
-# 官方预处理参数
-IMG_MEAN_255 = np.array([0.485, 0.456, 0.406], dtype=np.float32) * 255.
-IMG_STD_255 = np.array([0.229, 0.224, 0.225], dtype=np.float32) * 255.
+# ==========================================
+# 2. 从核心包直接导入 API（避开 utils 命名冲突）
+# ==========================================
+from sam_3d_body import load_sam_3d_body_hf, SAM3DBodyEstimator
 
 
 class ReconstructionEngine:
-    def __init__(self, device='cuda:0'):
-        self.model_root = os.path.expanduser('~/workspace/HSMR/data_inputs/released_models/HSMR-ViTH-r1d1')
+    def __init__(self, hf_repo_id="facebook/sam-3d-body-dinov3", device='cuda'):
+        """
+        初始化 SAM 3D Body 引擎
+        """
+        print(f">>> 正在加载 Meta SAM 3D Body 模型 ({hf_repo_id})...")
+
+        if device is None:
+            device = "cuda" if torch.cuda.is_available() else "cpu"
+
+        # 加载核心模型
+        model, model_cfg = load_sam_3d_body_hf(hf_repo_id, device=device)
+
+        # 初始化 Estimator
+        self.estimator = SAM3DBodyEstimator(
+            sam_3d_body_model=model,
+            model_cfg=model_cfg,
+            human_detector=None,
+            human_segmentor=None,
+            fov_estimator=None
+        )
         self.device = device
+        print(">>> 🚀 SAM 3D Body 模型加载完成！")
 
-        # ⛩️ 1. 官方 Detector
-        self.detector = build_detector(batch_size=1, max_img_size=512, device=self.device)
+    def predict_mesh(self, image_path: str, save_path: str):
+        img_cv2 = cv2.imread(image_path)
+        if img_cv2 is None:
+            raise ValueError(f"❌ 无法读取图像: {image_path}")
+        height, width = img_cv2.shape[:2]
 
-        # ⛩️ 2. 官方 HSMR Pipeline
-        # 这个 pipeline 启动后，内部会自动加载它自带的 SMPL-X/SKEL 模型
-        self.pipeline = build_inference_pipeline(model_root=self.model_root, device=self.device)
+        print(f">>> 正在处理图像: {image_path}")
 
-        # ⛩️ 3. 关键：直接从 pipeline 引用模型信息
-        self.faces = self.pipeline.skel_model.skin_f.detach().cpu().numpy()
-        self.j_regressor = self.pipeline.skel_model.J_regressor.to_dense().detach().cpu().numpy()
-        print(">>> ✅ 已通过 HSMR 内部 skel_model 获取 SMPL-X 拓扑，无需外部库。")
+        outputs = self.estimator.process_one_image(image_path)
 
-    @torch.no_grad()
-    def predict(self, image_path):
-        img = cv2.imread(image_path)
-        if img is None: return None
-        raw_h, raw_w = img.shape[:2]
-        raw_imgs = [img]
+        if not outputs or len(outputs) == 0:
+            raise ValueError("❌ 预测失败，未检测到人物。")
 
-        # 1. 官方检测与切片
-        detector_outputs = self.detector(raw_imgs)
-        patches, det_meta = imgs_det2patches(raw_imgs, *detector_outputs, max_instances_per_img=1)
+        person_data = outputs[0]
 
-        if len(patches) == 0: return None
+        # 提取 Mesh
+        vertices = person_data["pred_vertices"]
+        if hasattr(vertices, 'cpu'):
+            vertices = vertices.detach().cpu().numpy()
 
-        # 2. 官方模型推理
-        patches_normalized = (patches - IMG_MEAN_255) / IMG_STD_255
-        patches_normalized = torch.from_numpy(patches_normalized).permute(0, 3, 1, 2).to(self.device)
-        outputs = self.pipeline(patches_normalized)
+        faces = self.estimator.faces
+        if hasattr(faces, 'cpu'):
+            faces = faces.detach().cpu().numpy()
 
-        # 3. 提取 Mesh 和参数
-        pd_params = {k: v.detach().cpu() for k, v in outputs['pd_params'].items()}
-        pd_cam_t = outputs['pd_cam_t'].detach().cpu()[0]  # [tx, ty, tz]
+        mesh = trimesh.Trimesh(vertices, faces)
+        mesh.export(save_path)
+        print(f"[SAM-3D-Body] ✨ 成功! Mesh 已保存至: {save_path}")
 
-        m_skin, _ = prepare_mesh(self.pipeline, pd_params)
-        vertices = m_skin['v'][0].numpy()  # 原始 6890 个顶点
+        # 提取相机参数
+        focal_length = float(person_data["focal_length"])
+        global_cam = {
+            'focal': np.array([focal_length, focal_length]),
+            'princpt': np.array([width / 2.0, height / 2.0]),
+            'cam_t': person_data.get("pred_cam_t")
+        }
 
-        # 4. ⛩️ 官方相机修正逻辑 (确定的证据：来自 lib/kits/hsmr_demo.py)
-        raw_cx, raw_cy = raw_w / 2.0, raw_h / 2.0
-        bbx_cs = det_meta['bbx_cs'][0]  # [cx, cy, s]
-        focal = 5000.0  # 官方硬编码虚拟焦距
+        # 提取关节点
+        joints_3d = person_data.get("pred_keypoints_3d")
+        if joints_3d is not None and hasattr(joints_3d, 'cpu'):
+            joints_3d = joints_3d.detach().cpu().numpy()
 
-        corrected_cam_t = pd_cam_t.clone()
-        # 深度修正 (这是最重要的一步，解决了你之前坐标爆炸到几亿的问题)
-        corrected_cam_t[2] = pd_cam_t[2] * 256.0 / bbx_cs[2]
-        # X, Y 位移补偿
-        corrected_cam_t[0] += (bbx_cs[0] - raw_cx) / focal * corrected_cam_t[2]
-        corrected_cam_t[1] += (bbx_cs[1] - raw_cy) / focal * corrected_cam_t[2]
-
-        # ⛩️ 5. 将顶点转换到全局原图相机空间
-        # 只有这样，外层的 project_mesh_overlay 才能用统一的 K 矩阵投回原图
-        global_vertices = vertices + corrected_cam_t.numpy()
-
-        return {
-            'vertices': global_vertices,
-            'bbox_cs': bbx_cs,
-            'global_cam': {
-                'focal': np.array([focal, focal]),
-                'princpt': np.array([raw_cx, raw_cy])
+        pred_joints_dict = {}
+        if joints_3d is not None:
+            is_smpl = len(joints_3d) >= 24
+            pred_joints_dict = {
+                'pelvis': joints_3d[0],
+                'left_hip': joints_3d[1] if is_smpl else joints_3d[11],
+                'right_hip': joints_3d[2] if is_smpl else joints_3d[12],
+                'left_knee': joints_3d[4] if is_smpl else joints_3d[13],
+                'right_knee': joints_3d[5] if is_smpl else joints_3d[14],
+                'left_ankle': joints_3d[7] if is_smpl else joints_3d[15],
+                'right_ankle': joints_3d[8] if is_smpl else joints_3d[16],
+                'neck': joints_3d[12] if is_smpl else joints_3d[0],
+                'left_shoulder': joints_3d[16] if is_smpl else joints_3d[5],
+                'right_shoulder': joints_3d[17] if is_smpl else joints_3d[6],
+                'left_elbow': joints_3d[18] if is_smpl else joints_3d[7],
+                'right_elbow': joints_3d[19] if is_smpl else joints_3d[8],
+                'left_wrist': joints_3d[20] if is_smpl else joints_3d[9],
+                'right_wrist': joints_3d[21] if is_smpl else joints_3d[10],
             }
-        }
 
-    @torch.no_grad()
-    def predict_mesh(self, image_path, save_path):
-        res = self.predict(image_path)
-        if res is None: return None
+        # 五官映射
+        if len(vertices) > 10000:
+            pred_joints_dict.update({
+                'nose': vertices[9120], 'left_eye': vertices[9448], 'right_eye': vertices[9929],
+                'left_ear': vertices[6], 'right_ear': vertices[616],
+            })
+        else:
+            pred_joints_dict.update({
+                'nose': vertices[331], 'left_eye': vertices[2802], 'right_eye': vertices[6262],
+                'left_ear': vertices[3489], 'right_ear': vertices[3990],
+            })
 
-        vertices = res['vertices']  # (10475, 3)
-
-        # ⛩️ 使用内部回归矩阵计算 55 个关节点
-        # HSMR 的 regressor 通常已经在 GPU 上，这里 res['vertices'] 如果是 numpy 需要处理下
-        synced_joints = np.matmul(self.j_regressor, vertices)
-
-        # 导出 Mesh (使用内部获取的 faces)
-        import trimesh
-        mesh_obj = trimesh.Trimesh(vertices, self.faces)
-        mesh_obj.export(save_path)
-
-        # ⛩️ 组装关节点字典
-        pred_joints_dict = {
-            # 躯干 24 点 (使用 synced_joints)
-            'pelvis': synced_joints[0],
-            'left_hip': synced_joints[1],
-            'right_hip': synced_joints[2],
-            'left_knee': synced_joints[4],
-            'right_knee': synced_joints[5],
-            'left_ankle': synced_joints[7],
-            'right_ankle': synced_joints[8],
-            'neck': synced_joints[12],
-            'left_shoulder': synced_joints[16],
-            'right_shoulder': synced_joints[17],
-            'left_elbow': synced_joints[18],
-            'right_elbow': synced_joints[19],
-            'left_wrist': synced_joints[20],
-            'right_wrist': synced_joints[21],
-
-            # 五官点 (SMPL-X 拓扑固定，索引不变)
-            'nose': vertices[331],
-            'left_eye': vertices[332],
-            'right_eye': vertices[329],
-            'left_ear': vertices[348],
-            'right_ear': vertices[349],
-        }
-
-        return save_path, pred_joints_dict, res['global_cam'], mesh_obj
+        return save_path, pred_joints_dict, global_cam, mesh
