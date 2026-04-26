@@ -221,7 +221,7 @@ class ReconstructionEngine:
         }
 
         # 🌟 直接返回绝对精准的全局相机参数
-        return save_path, pred_joints_dict, res['global_cam']
+        return save_path, pred_joints_dict, res['global_cam'], mesh
 
 
 # if __name__ == "__main__":
