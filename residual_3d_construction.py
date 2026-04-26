@@ -3,7 +3,7 @@ from pathlib import Path
 
 from main_pipeline import calculate_miou
 from pose_extractor import read_kpts_annotation
-from sam_3d_body import ReconstructionEngine
+from sam_3d_body_recon import ReconstructionEngine
 
 import os
 import cv2

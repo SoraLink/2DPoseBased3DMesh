@@ -6,6 +6,8 @@ import numpy as np
 import torchvision.transforms as transforms
 from pathlib import Path
 
+from PIL import Image
+
 # 路径管理
 ROOT_DIR = '/home/sora/workspace/SMPLest-X'
 if ROOT_DIR not in sys.path:
