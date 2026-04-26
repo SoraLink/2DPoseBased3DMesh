@@ -1,36 +1,21 @@
 import sys
 import os
-
 import cv2
 import numpy as np
 import trimesh
+import torch
 
-# ========================================================
-# 1. 核心路径配置（请务必检查这两个路径是否准确）
-# ========================================================
-# Meta 仓库的克隆根目录
+# ==========================================
+# 1. 暴力注入 Meta 仓库路径（解决瞎子问题）
+# ==========================================
 REPO_ROOT = '/home/sora/workspace/sam-3d-body'
-# utils.py 所在的实际位置（根据截图推断在 notebook 文件夹下）
-UTILS_DIR = os.path.join(REPO_ROOT, 'notebook')
-
-# ========================================================
-# 2. 路径注入（使用 insert(0, ...) 确保优先级最高，防止被系统同名包拦截）
-# ========================================================
-if UTILS_DIR not in sys.path:
-    sys.path.insert(0, UTILS_DIR)
-
 if REPO_ROOT not in sys.path:
     sys.path.insert(0, REPO_ROOT)
 
-# ========================================================
-# 3. 现在进行导入
-# ========================================================
-try:
-    from utils import setup_sam_3d_body
-    print("✅ 成功从 Meta 仓库加载 utils 模块")
-except ImportError as e:
-    print(f"❌ 依然无法找到 utils，当前的搜索路径为: {sys.path[:3]}")
-    raise e
+# ==========================================
+# 2. 从核心包直接导入 API（避开 utils 命名冲突）
+# ==========================================
+from sam_3d_body import load_sam_3d_body_hf, SAM3DBodyEstimator
 
 
 class ReconstructionEngine:
@@ -39,13 +24,25 @@ class ReconstructionEngine:
         初始化 SAM 3D Body 引擎
         """
         print(f">>> 正在加载 Meta SAM 3D Body 模型 ({hf_repo_id})...")
-        # 直接使用 Meta 提供的 setup 初始化端到端模型
-        self.estimator = setup_sam_3d_body(hf_repo_id=hf_repo_id)
+
+        if device is None:
+            device = "cuda" if torch.cuda.is_available() else "cpu"
+
+        # 加载核心模型
+        model, model_cfg = load_sam_3d_body_hf(hf_repo_id, device=device)
+
+        # 初始化 Estimator
+        self.estimator = SAM3DBodyEstimator(
+            sam_3d_body_model=model,
+            model_cfg=model_cfg,
+            human_detector=None,
+            human_segmentor=None,
+            fov_estimator=None
+        )
         self.device = device
         print(">>> 🚀 SAM 3D Body 模型加载完成！")
 
     def predict_mesh(self, image_path: str, save_path: str):
-        # 1. 读取原图获取尺寸（用于计算相机中心点）
         img_cv2 = cv2.imread(image_path)
         if img_cv2 is None:
             raise ValueError(f"❌ 无法读取图像: {image_path}")
@@ -53,18 +50,14 @@ class ReconstructionEngine:
 
         print(f">>> 正在处理图像: {image_path}")
 
-        # 2. 调用 SAM 3D Body 进行推理
         outputs = self.estimator.process_one_image(image_path)
 
         if not outputs or len(outputs) == 0:
-            raise ValueError("❌ 预测失败，SAM 3D Body 未在图像中检测到人物。")
+            raise ValueError("❌ 预测失败，未检测到人物。")
 
-        # 获取第一个人的数据
         person_data = outputs[0]
 
-        # ==========================================
-        # 3. 提取 3D 网格 (Mesh) -> 根据 utils.py，确切 Key 是 'pred_vertices'
-        # ==========================================
+        # 提取 Mesh
         vertices = person_data["pred_vertices"]
         if hasattr(vertices, 'cpu'):
             vertices = vertices.detach().cpu().numpy()
@@ -77,22 +70,15 @@ class ReconstructionEngine:
         mesh.export(save_path)
         print(f"[SAM-3D-Body] ✨ 成功! Mesh 已保存至: {save_path}")
 
-        # ==========================================
-        # 4. 构建全局相机参数 (global_cam) -> 根据 utils.py，使用 focal_length
-        # ==========================================
-        # SMPLest-X 格式通常需要分别指定 x 和 y 方向的焦距，这里用同一个值
+        # 提取相机参数
         focal_length = float(person_data["focal_length"])
-
         global_cam = {
             'focal': np.array([focal_length, focal_length]),
             'princpt': np.array([width / 2.0, height / 2.0]),
-            'cam_t': person_data["pred_cam_t"]  # 保留平移参数以防下游需要
+            'cam_t': person_data.get("pred_cam_t")
         }
 
-        # ==========================================
-        # 5. 提取并映射关节点 (pred_joints_dict)
-        # ==========================================
-        # utils.py 中提取了 'pred_keypoints_2d'，我们提取对应的 3D 关节点
+        # 提取关节点
         joints_3d = person_data.get("pred_keypoints_3d")
         if joints_3d is not None and hasattr(joints_3d, 'cpu'):
             joints_3d = joints_3d.detach().cpu().numpy()
@@ -117,13 +103,13 @@ class ReconstructionEngine:
                 'right_wrist': joints_3d[21] if is_smpl else joints_3d[10],
             }
 
-        # 五官部分依然通过顶点索引获取，最稳定
-        if len(vertices) > 10000:  # SMPL-X
+        # 五官映射
+        if len(vertices) > 10000:
             pred_joints_dict.update({
                 'nose': vertices[9120], 'left_eye': vertices[9448], 'right_eye': vertices[9929],
                 'left_ear': vertices[6], 'right_ear': vertices[616],
             })
-        else:  # SMPL
+        else:
             pred_joints_dict.update({
                 'nose': vertices[331], 'left_eye': vertices[2802], 'right_eye': vertices[6262],
                 'left_ear': vertices[3489], 'right_ear': vertices[3990],
