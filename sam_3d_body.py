@@ -1,9 +1,14 @@
 import os
+import sys
+
 import cv2
 import numpy as np
 import trimesh
+SAM3D_DIR = '/home/sora/workspace/sam-3d-body'
+if SAM3D_DIR not in sys.path:
+    sys.path.append(SAM3D_DIR)
 
-# 导入 Meta SAM 3D Body 的官方工具（基于你提供的第一段代码）
+# 这样 Python 就能找到这个目录下的模块了
 from utils import setup_sam_3d_body
 
 
