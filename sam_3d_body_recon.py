@@ -84,44 +84,38 @@ class ReconstructionEngine:
             'cam_t': cam_t
         }
 
-        # 3. 提取 3D 关节点，并立刻加上 cam_t
         joints_3d = person_data.get("pred_keypoints_3d")
         if joints_3d is not None and hasattr(joints_3d, 'cpu'):
             joints_3d = joints_3d.detach().cpu().numpy()
 
         if joints_3d is not None and cam_t is not None:
-            joints_3d = joints_3d + cam_t  # 🌟 加上偏移！
+            joints_3d = joints_3d + cam_t  # 🌟 加上偏移，转换到相机绝对坐标系
 
         pred_joints_dict = {}
         if joints_3d is not None:
-            is_smpl = len(joints_3d) >= 24
+            # 🌟 核心修复：SAM 3D Body 的 MHR70 格式，前 17 个点就是完美的 COCO 17！
+            # 顺序和你代码里的 METAINFO 'keypoint_info' 做到 100% 绝对对齐。
             pred_joints_dict = {
-                'pelvis': joints_3d[0],
-                'left_hip': joints_3d[1] if is_smpl else joints_3d[11],
-                'right_hip': joints_3d[2] if is_smpl else joints_3d[12],
-                'left_knee': joints_3d[4] if is_smpl else joints_3d[13],
-                'right_knee': joints_3d[5] if is_smpl else joints_3d[14],
-                'left_ankle': joints_3d[7] if is_smpl else joints_3d[15],
-                'right_ankle': joints_3d[8] if is_smpl else joints_3d[16],
-                'neck': joints_3d[12] if is_smpl else joints_3d[0],
-                'left_shoulder': joints_3d[16] if is_smpl else joints_3d[5],
-                'right_shoulder': joints_3d[17] if is_smpl else joints_3d[6],
-                'left_elbow': joints_3d[18] if is_smpl else joints_3d[7],
-                'right_elbow': joints_3d[19] if is_smpl else joints_3d[8],
-                'left_wrist': joints_3d[20] if is_smpl else joints_3d[9],
-                'right_wrist': joints_3d[21] if is_smpl else joints_3d[10],
+                'nose': joints_3d[0],
+                'left_eye': joints_3d[1],
+                'right_eye': joints_3d[2],
+                'left_ear': joints_3d[3],
+                'right_ear': joints_3d[4],
+                'left_shoulder': joints_3d[5],
+                'right_shoulder': joints_3d[6],
+                'left_elbow': joints_3d[7],
+                'right_elbow': joints_3d[8],
+                'left_wrist': joints_3d[9],
+                'right_wrist': joints_3d[10],
+                'left_hip': joints_3d[11],
+                'right_hip': joints_3d[12],
+                'left_knee': joints_3d[13],
+                'right_knee': joints_3d[14],
+                'left_ankle': joints_3d[15],
+                'right_ankle': joints_3d[16],
+
+                # SMPLest-X 可能还需要这两个基础骨骼点，用中点生成即可
+                'pelvis': (joints_3d[11] + joints_3d[12]) / 2.0,
+                'neck': (joints_3d[5] + joints_3d[6]) / 2.0
             }
-
-        # 五官映射 (由于 vertices 已经加上了 cam_t，这里直接取顶点依然是正确的绝对物理坐标)
-        if len(vertices) > 10000:
-            pred_joints_dict.update({
-                'nose': vertices[9120], 'left_eye': vertices[9448], 'right_eye': vertices[9929],
-                'left_ear': vertices[6], 'right_ear': vertices[616],
-            })
-        else:
-            pred_joints_dict.update({
-                'nose': vertices[331], 'left_eye': vertices[2802], 'right_eye': vertices[6262],
-                'left_ear': vertices[3489], 'right_ear': vertices[3990],
-            })
-
         return save_path, pred_joints_dict, global_cam, mesh
