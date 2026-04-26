@@ -48,19 +48,26 @@ class ReconstructionEngine:
             raise ValueError(f"❌ 无法读取图像: {image_path}")
         height, width = img_cv2.shape[:2]
 
-        print(f">>> 正在处理图像: {image_path}")
-
         outputs = self.estimator.process_one_image(image_path)
-
         if not outputs or len(outputs) == 0:
             raise ValueError("❌ 预测失败，未检测到人物。")
 
         person_data = outputs[0]
 
-        # 提取 Mesh
+        # ==========================================
+        # 🚨 关键修复：提取相机平移参数 cam_t
+        # ==========================================
+        cam_t = person_data.get("pred_cam_t")
+        if cam_t is not None and hasattr(cam_t, 'cpu'):
+            cam_t = cam_t.detach().cpu().numpy()
+
+        # 1. 提取 Mesh 顶点，并立刻加上 cam_t (将局部坐标转换到相机物理坐标)
         vertices = person_data["pred_vertices"]
         if hasattr(vertices, 'cpu'):
             vertices = vertices.detach().cpu().numpy()
+
+        if cam_t is not None:
+            vertices = vertices + cam_t  # 🌟 加上偏移！
 
         faces = self.estimator.faces
         if hasattr(faces, 'cpu'):
@@ -68,20 +75,22 @@ class ReconstructionEngine:
 
         mesh = trimesh.Trimesh(vertices, faces)
         mesh.export(save_path)
-        print(f"[SAM-3D-Body] ✨ 成功! Mesh 已保存至: {save_path}")
 
-        # 提取相机参数
+        # 2. 提取并更新相机内参 (下游用不到 cam_t 了，因为已经加过了)
         focal_length = float(person_data["focal_length"])
         global_cam = {
             'focal': np.array([focal_length, focal_length]),
             'princpt': np.array([width / 2.0, height / 2.0]),
-            'cam_t': person_data.get("pred_cam_t")
+            'cam_t': cam_t
         }
 
-        # 提取关节点
+        # 3. 提取 3D 关节点，并立刻加上 cam_t
         joints_3d = person_data.get("pred_keypoints_3d")
         if joints_3d is not None and hasattr(joints_3d, 'cpu'):
             joints_3d = joints_3d.detach().cpu().numpy()
+
+        if joints_3d is not None and cam_t is not None:
+            joints_3d = joints_3d + cam_t  # 🌟 加上偏移！
 
         pred_joints_dict = {}
         if joints_3d is not None:
@@ -103,7 +112,7 @@ class ReconstructionEngine:
                 'right_wrist': joints_3d[21] if is_smpl else joints_3d[10],
             }
 
-        # 五官映射
+        # 五官映射 (由于 vertices 已经加上了 cam_t，这里直接取顶点依然是正确的绝对物理坐标)
         if len(vertices) > 10000:
             pred_joints_dict.update({
                 'nose': vertices[9120], 'left_eye': vertices[9448], 'right_eye': vertices[9929],
