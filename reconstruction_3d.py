@@ -171,7 +171,7 @@ class ReconstructionEngine:
     def predict_mesh(self, image_path, save_path: str):
         res = self.predict(image_path)
         if res is None:
-            return None, None, None
+            return None, None, None, None
 
         vertices = res['mesh']
         faces = self.smpl_x.face

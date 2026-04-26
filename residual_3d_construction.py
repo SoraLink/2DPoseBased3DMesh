@@ -524,21 +524,21 @@ def load_gt_mask(image_path):
 def main(ori_image_path, gen_image_path,reconstructor, annotation_file):
     kpts_orig, kpts, types_orig = read_kpts_annotation(ori_image_path, annotation_file)
 
-    # for i in range(len(kpts_orig)):
-    #     kpts_orig[i][0] /= 3.0  # x 坐标缩小
-    #     kpts_orig[i][1] /= 3.0  # y 坐标缩小
+    for i in range(len(kpts_orig)):
+        kpts_orig[i][0] /= 3.0  # x 坐标缩小
+        kpts_orig[i][1] /= 3.0  # y 坐标缩小
 
     img_ori_temp = cv2.imread(ori_image_path)
     target_h, target_w = img_ori_temp.shape[:2]
 
     # 🌟 修复 1：强制转换为整数
-    # target_h, target_w = int(target_h / 3), int(target_w / 3)
-
-    # image_ori_temp = cv2.resize(img_ori_temp, (target_w, target_h), interpolation=cv2.INTER_AREA)
-    # base_name, ext = os.path.splitext(ori_image_path)
-    # temp_ori_path = f"{base_name}_resized{ext}"
-    # cv2.imwrite(temp_ori_path, image_ori_temp)
-    # ori_image_path = temp_ori_path
+    target_h, target_w = int(target_h / 3), int(target_w / 3)
+    #
+    image_ori_temp = cv2.resize(img_ori_temp, (target_w, target_h), interpolation=cv2.INTER_AREA)
+    base_name, ext = os.path.splitext(ori_image_path)
+    temp_ori_path = f"{base_name}_resized{ext}"
+    cv2.imwrite(temp_ori_path, image_ori_temp)
+    ori_image_path = temp_ori_path
 
     img_gen_temp = cv2.imread(gen_image_path)
     img_gen_resized = cv2.resize(img_gen_temp, (target_w, target_h), interpolation=cv2.INTER_AREA)
@@ -550,7 +550,7 @@ def main(ori_image_path, gen_image_path,reconstructor, annotation_file):
     mesh_save_path = os.path.join(dir_name, "whole_body_mesh.obj")
 
     try:
-        mesh_save_path, pred_joints_3d, pred_cam, mesh = reconstructor.predict_mesh(ori_image_path, mesh_save_path)
+        mesh_save_path, pred_joints_3d, pred_cam, mesh = reconstructor.predict_mesh(temp_gen_path, mesh_save_path)
     except SystemExit as e:  # 建议抓取通用 Exception 兜底
         print(e)
         return 0, 0, 0
