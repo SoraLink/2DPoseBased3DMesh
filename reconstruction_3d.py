@@ -73,17 +73,9 @@ class ReconstructionEngine:
         original_img = load_img(image_path)
         height, width = original_img.shape[:2]
 
-        # YOLO 检测
-        yolo_results = self.detector.predict(original_img, device='cuda', classes=0, verbose=False)
-        yolo_bbox = yolo_results[0].boxes.xyxy.detach().cpu().numpy()
-
-        if len(yolo_bbox) < 1:
-            return None
-
-        # 构建 xywh
-        det = yolo_bbox[0]
-        yolo_bbox_xywh = np.array([det[0], det[1], det[2] - det[0], det[3] - det[1]])
-
+        # 🚀 绕过 YOLO，直接把整张图作为 BBox
+        # 格式为 [top_left_x, top_left_y, width, height]
+        yolo_bbox_xywh = np.array([0, 0, width, height])
         # 调用 process_bbox (这会返回 [top_left_x, top_left_y, width, height])
         bbox = process_bbox(
             bbox=yolo_bbox_xywh,
@@ -171,7 +163,7 @@ class ReconstructionEngine:
     def predict_mesh(self, image_path, save_path: str):
         res = self.predict(image_path)
         if res is None:
-            return None, None, None, None
+            raise ValueError("❌ 预测失败，可能是因为没有检测到人。请检查输入图像。")
 
         vertices = res['mesh']
         faces = self.smpl_x.face
