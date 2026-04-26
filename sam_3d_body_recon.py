@@ -1,15 +1,36 @@
-import os
 import sys
+import os
 
 import cv2
 import numpy as np
 import trimesh
-SAM3D_DIR = '/home/sora/workspace/sam-3d-body'
-if SAM3D_DIR not in sys.path:
-    sys.path.append(SAM3D_DIR)
 
-# 这样 Python 就能找到这个目录下的模块了
-from utils import setup_sam_3d_body
+# ========================================================
+# 1. 核心路径配置（请务必检查这两个路径是否准确）
+# ========================================================
+# Meta 仓库的克隆根目录
+REPO_ROOT = '/home/sora/workspace/sam-3d-body'
+# utils.py 所在的实际位置（根据截图推断在 notebook 文件夹下）
+UTILS_DIR = os.path.join(REPO_ROOT, 'notebook')
+
+# ========================================================
+# 2. 路径注入（使用 insert(0, ...) 确保优先级最高，防止被系统同名包拦截）
+# ========================================================
+if UTILS_DIR not in sys.path:
+    sys.path.insert(0, UTILS_DIR)
+
+if REPO_ROOT not in sys.path:
+    sys.path.insert(0, REPO_ROOT)
+
+# ========================================================
+# 3. 现在进行导入
+# ========================================================
+try:
+    from utils import setup_sam_3d_body
+    print("✅ 成功从 Meta 仓库加载 utils 模块")
+except ImportError as e:
+    print(f"❌ 依然无法找到 utils，当前的搜索路径为: {sys.path[:3]}")
+    raise e
 
 
 class ReconstructionEngine:
