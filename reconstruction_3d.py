@@ -19,6 +19,9 @@ from ultralytics import YOLO
 import trimesh
 import torch
 import numpy as np
+from sam3.model_builder import build_sam3_image_model
+from sam3.model.sam3_image_processor import Sam3Processor
+
 
 
 class ReconstructionEngine:
