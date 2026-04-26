@@ -6,8 +6,6 @@ import numpy as np
 import torchvision.transforms as transforms
 from pathlib import Path
 
-from pose_extractor import read_kpts_annotation
-
 # 路径管理
 ROOT_DIR = '/home/sora/workspace/SMPLest-X'
 if ROOT_DIR not in sys.path:
@@ -25,16 +23,12 @@ import numpy as np
 
 class ReconstructionEngine:
     def __init__(self, ckpt_name='smplest_x_h', device='cuda'):
-        # 1. 核心路径定义（真相大白：是 human_model_files 而不是 data！）
         human_model_path = os.path.join(ROOT_DIR, 'human_models', 'human_model_files')
         checkpoint_path = os.path.join(ROOT_DIR, 'pretrained_models', ckpt_name, f'{ckpt_name}.pth.tar')
         config_path = os.path.join(ROOT_DIR, 'pretrained_models', ckpt_name, 'config_base.py')
         dummy_log_dir = os.path.join(ROOT_DIR, 'outputs', 'api_logs')
 
-        # 2. 初始化 Config
         self.cfg = Config.load_config(config_path)
-
-        # 3. 注入所有关键路径
         new_config = {
             "model": {
                 "pretrained_model_path": checkpoint_path,
@@ -48,73 +42,101 @@ class ReconstructionEngine:
         self.cfg.update_config(new_config)
         self.cfg.prepare_log()
 
-        # 🔥 强行挂载全局的 SMPLX
         from human_models.human_models import SMPLX
         try:
             self.smpl_x = SMPLX(human_model_path)
         except Exception as e:
-            # 万一他又包了一层，做个防御性退化
-            print(f"警告: 默认路径挂载失败，尝试备用路径... ({e})")
             SMPLX.config = human_model_path
 
-        # 4. 初始化 Tester
         self.demoer = Tester(self.cfg)
         self.demoer._make_model()
         self.demoer.model.eval()
-
-        # 5. YOLO
-        bbox_model_path = os.path.join(ROOT_DIR, 'pretrained_models/yolov8x.pt')
-        self.detector = YOLO(bbox_model_path)
-
         self.transform = transforms.ToTensor()
         self.device = torch.device(device)
-        print(">>> 🚀 终于搞定了！模型已进入显存。")
+
+        # ==========================================
+        # 🚀 初始化 SAM 3，彻底抛弃 YOLO
+        # ==========================================
+        print(">>> 正在加载 SAM 3 大模型...")
+        sam_model = build_sam3_image_model()
+        sam_model.to(device=self.device)
+        sam_model.eval()
+        self.sam_processor = Sam3Processor(sam_model)
+
+        print(">>> 🚀 终于搞定了！SMPLest-X & SAM 3 已进入显存。")
 
     @torch.no_grad()
     def predict(self, image_path):
+        # SMPLest-X 需要的 cvimg
         original_img = load_img(image_path)
-        kpt_img_path = image_path.replace('_resized', '')
-        filtered_kpts, ori_kpts, types = read_kpts_annotation(kpt_img_path, './data/filtered_annotations_padded_png.json')
         height, width = original_img.shape[:2]
-        kpts = np.array(ori_kpts)
-        types_arr = np.array(types)
-        valid_mask = (types_arr != 2)
-        valid_kpts = kpts[valid_mask]
-        min_x, min_y = np.min(valid_kpts[:, :2], axis=0)
-        max_x, max_y = np.max(valid_kpts[:, :2], axis=0)
 
-        w_kpt = max_x - min_x
-        h_kpt = max_y - min_y
-        center_x = min_x + w_kpt / 2
-        center_y = min_y + h_kpt / 2
+        # ==========================================
+        # 🔥 使用 SAM 3 提取精准 BBox
+        # ==========================================
+        # SAM 3 需要 PIL Image
+        pil_image = Image.open(image_path).convert("RGB")
 
-        # 3. 🔥 核心：增加外扩 Padding（模拟真实 BBox）
-        # 通常 3D 模型需要 1.2 倍左右的边界框来保证人体完整不被截断
+        with torch.autocast(device_type="cuda" if "cuda" in str(self.device) else "cpu"):
+            inference_state = self.sam_processor.set_image(pil_image)
+            output = self.sam_processor.set_text_prompt(state=inference_state, prompt="person")
+
+        boxes = output["boxes"]
+        boxes_np = boxes.cpu().numpy() if hasattr(boxes, 'cpu') else np.array(boxes)
+
+        # 兼容维度
+        if boxes_np.ndim == 3:
+            boxes_np = boxes_np.squeeze(1)  # 变成 (N, 4)
+
+        num_masks = boxes_np.shape[0]
+
+        if num_masks == 0:
+            print(f"⚠️ 警告: SAM 3 未检测到人物！")
+            return None
+
+        # 复用你的优秀过滤逻辑：面积大且靠近中心
+        img_w, img_h = width, height
+        img_cx, img_cy = img_w / 2, img_h / 2
+        best_idx = 0
+        best_score = -1
+
+        for i in range(num_masks):
+            x1, y1, x2, y2 = boxes_np[i]
+            area = (x2 - x1) * (y2 - y1)
+            box_cx, box_cy = (x1 + x2) / 2, (y1 + y2) / 2
+            dist = np.sqrt(((box_cx - img_cx) / img_w) ** 2 + ((box_cy - img_cy) / img_h) ** 2)
+            score = area * (1.0 - dist)
+
+            if score > best_score:
+                best_score = score
+                best_idx = i
+
+        # 获取最佳框的坐标
+        best_x1, best_y1, best_x2, best_y2 = boxes_np[best_idx]
+        w_kpt = best_x2 - best_x1
+        h_kpt = best_y2 - best_y1
+        center_x = best_x1 + w_kpt / 2
+        center_y = best_y1 + h_kpt / 2
+
+        # 🚀 核心：SAM 的框是紧贴像素边缘的，必须加 1.2 倍外扩，否则重建断手断脚
         scale_factor = 1.2
-
-        # 在有些极端的 Pose 下，宽大于高，按长边统一放缩更安全
         max_side = max(w_kpt, h_kpt)
         new_w = max_side * scale_factor
         new_h = max_side * scale_factor
 
-        # 或者如果你想保持非正方形的 BBox 交给后面的 generate_patch_image 处理：
-        # new_w = w_kpt * scale_factor
-        # new_h = h_kpt * scale_factor
-
-        # 4. 计算新的左上角并进行原图边界保护
         new_min_x = max(0, center_x - new_w / 2)
         new_min_y = max(0, center_y - new_h / 2)
-
-        # 确保右下角不超图片边界
         new_w = min(new_w, width - new_min_x)
         new_h = min(new_h, height - new_min_y)
 
-        yolo_bbox_xywh = np.array([new_min_x, new_min_y, new_w, new_h])
-        # 🚀 绕过 YOLO，直接把整张图作为 BBox
-        # 格式为 [top_left_x, top_left_y, width, height]
-        # 调用 process_bbox (这会返回 [top_left_x, top_left_y, width, height])
+        # 转换为 process_bbox 需要的 [x, y, w, h]
+        sam_bbox_xywh = np.array([new_min_x, new_min_y, new_w, new_h])
+
+        # ==========================================
+        # 进入 SMPLest-X 原生流程
+        # ==========================================
         bbox = process_bbox(
-            bbox=yolo_bbox_xywh,
+            bbox=sam_bbox_xywh,
             img_width=width,
             img_height=height,
             input_img_shape=self.cfg.model.input_img_shape
@@ -134,20 +156,10 @@ class ReconstructionEngine:
         inputs = {'img': img_tensor}
 
         out = self.demoer.model(inputs, {}, {}, 'test')
-
         joints_3d = out['smplx_joint_cam'].detach().cpu().numpy()[0]
         mesh = out['smplx_mesh_cam'].detach().cpu().numpy()[0]
 
-        # vertices = out['smplx_mesh_cam'].detach().cpu().numpy()[0]
-        # regressor = self.smpl_x.J_regressor
-        # synced_joints = np.matmul(regressor, vertices)
-        # aligned_144 = self.align_joints(joints_3d, synced_joints)
-        # ==========================================
-        # 👑 官方解法：按 BBox 比例直接缩放相机内参
-        # ==========================================
-        # 为了防报错，做个属性兼容
         input_shape = getattr(self.cfg.model, 'input_body_shape', self.cfg.model.input_img_shape)
-
         global_focal = [
             self.cfg.model.focal[0] / input_shape[1] * bbox[2],
             self.cfg.model.focal[1] / input_shape[0] * bbox[3]
