@@ -6,6 +6,8 @@ import numpy as np
 import torchvision.transforms as transforms
 from pathlib import Path
 
+from pose_extractor import read_kpts_annotation
+
 # 路径管理
 ROOT_DIR = '/home/sora/workspace/SMPLest-X'
 if ROOT_DIR not in sys.path:
@@ -71,11 +73,45 @@ class ReconstructionEngine:
     @torch.no_grad()
     def predict(self, image_path):
         original_img = load_img(image_path)
+        kpt_img_path = image_path.replace('_resized', '')
+        filtered_kpts, ori_kpts, types = read_kpts_annotation(kpt_img_path, './data/filtered_annotations_padded_png.json')
         height, width = original_img.shape[:2]
+        kpts = np.array(ori_kpts)
+        types_arr = np.array(types)
+        valid_mask = (types_arr != 2)
+        valid_kpts = kpts[valid_mask]
+        min_x, min_y = np.min(valid_kpts[:, :2], axis=0)
+        max_x, max_y = np.max(valid_kpts[:, :2], axis=0)
 
+        w_kpt = max_x - min_x
+        h_kpt = max_y - min_y
+        center_x = min_x + w_kpt / 2
+        center_y = min_y + h_kpt / 2
+
+        # 3. 🔥 核心：增加外扩 Padding（模拟真实 BBox）
+        # 通常 3D 模型需要 1.2 倍左右的边界框来保证人体完整不被截断
+        scale_factor = 1.2
+
+        # 在有些极端的 Pose 下，宽大于高，按长边统一放缩更安全
+        max_side = max(w_kpt, h_kpt)
+        new_w = max_side * scale_factor
+        new_h = max_side * scale_factor
+
+        # 或者如果你想保持非正方形的 BBox 交给后面的 generate_patch_image 处理：
+        # new_w = w_kpt * scale_factor
+        # new_h = h_kpt * scale_factor
+
+        # 4. 计算新的左上角并进行原图边界保护
+        new_min_x = max(0, center_x - new_w / 2)
+        new_min_y = max(0, center_y - new_h / 2)
+
+        # 确保右下角不超图片边界
+        new_w = min(new_w, width - new_min_x)
+        new_h = min(new_h, height - new_min_y)
+
+        yolo_bbox_xywh = np.array([new_min_x, new_min_y, new_w, new_h])
         # 🚀 绕过 YOLO，直接把整张图作为 BBox
         # 格式为 [top_left_x, top_left_y, width, height]
-        yolo_bbox_xywh = np.array([0, 0, width, height])
         # 调用 process_bbox (这会返回 [top_left_x, top_left_y, width, height])
         bbox = process_bbox(
             bbox=yolo_bbox_xywh,
