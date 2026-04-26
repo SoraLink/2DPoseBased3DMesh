@@ -3,7 +3,7 @@ from pathlib import Path
 
 from main_pipeline import calculate_miou
 from pose_extractor import read_kpts_annotation
-from HSMR import ReconstructionEngine
+from reconstruction_3d import ReconstructionEngine
 
 import os
 import cv2
