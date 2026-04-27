@@ -121,6 +121,52 @@ METAINFO = {
     ],
 }
 
+def visualize_keypoints_comparison(img_path, pred_joints_2d, pred_joints_3d, global_cam, out_path):
+    """
+    将 2D 预测点(红) 与 3D 投影点(蓝) 画在同一张图上，并标注 0-16 的序号
+    """
+    img = cv2.imread(img_path)
+    if img is None:
+        return
+
+    focal = global_cam['focal']
+    princpt = global_cam['princpt']
+
+    # 严格按照 0-16 的顺序遍历 COCO 17 点
+    coco_keys = [
+        'nose', 'left_eye', 'right_eye', 'left_ear', 'right_ear',
+        'left_shoulder', 'right_shoulder', 'left_elbow', 'right_elbow',
+        'left_wrist', 'right_wrist', 'left_hip', 'right_hip',
+        'left_knee', 'right_knee', 'left_ankle', 'right_ankle'
+    ]
+
+    for i, key in enumerate(coco_keys):
+        # 🔴 1. 绘制模型预测的纯 2D 点 (红色)
+        if key in pred_joints_2d:
+            pt2d = pred_joints_2d[key]
+            cv2.circle(img, (int(pt2d[0]), int(pt2d[1])), 4, (0, 0, 255), -1)
+            # 在点的左上方写上编号
+            cv2.putText(img, f"2D:{i}", (int(pt2d[0]) - 10, int(pt2d[1]) - 10),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.4, (0, 0, 255), 1)
+
+        # 🔵 2. 绘制 3D 坐标强行投影回 2D 的点 (蓝色)
+        if key in pred_joints_3d:
+            vert = pred_joints_3d[key]
+            if vert[2] > 1e-5:
+                proj_x = focal[0] * (vert[0] / vert[2]) + princpt[0]
+                proj_y = focal[1] * (vert[1] / vert[2]) + princpt[1]
+                cv2.circle(img, (int(proj_x), int(proj_y)), 4, (255, 0, 0), -1)
+                # 在点的右下方写上编号，防止和红色字重叠
+                cv2.putText(img, f"3D:{i}", (int(proj_x) + 5, int(proj_y) + 15),
+                            cv2.FONT_HERSHEY_SIMPLEX, 0.4, (255, 0, 0), 1)
+
+    # 添加图例
+    cv2.putText(img, "Red: SAM 2D Pred", (15, 25), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 0, 255), 2)
+    cv2.putText(img, "Blue: SAM 3D Proj", (15, 50), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 0, 0), 2)
+
+    cv2.imwrite(out_path, img)
+    print(f"      👀 2D/3D 关键点可视化对比已保存至: {out_path}")
+
 
 def project_mesh_overlay(image_path, gen_image_path, mesh, global_cam, output_dir, is_full=False):
     """
@@ -528,15 +574,27 @@ def main(ori_image_path, gen_image_path,reconstructor, annotation_file):
         kpts_orig[i][0] /= 3.0  # x 坐标缩小
         kpts_orig[i][1] /= 3.0  # y 坐标缩小
 
-    img_ori_temp = cv2.imread(ori_image_path)
+    img_ori_temp = cv2.imread(ori_image_path, cv2.IMREAD_UNCHANGED)
+    if img_ori_temp is not None and img_ori_temp.shape[-1] == 4:
+        # 提取 Alpha 通道作为蒙版 (0~1)
+        alpha_channel = img_ori_temp[:, :, 3] / 255.0
+        # 创建一个全白的背景板
+        white_bg = np.ones_like(img_ori_temp[:, :, :3]) * 255
+        # 按蒙版比例将前景物体和白色背景混合
+        img_ori_temp = (img_ori_temp[:, :, :3] * alpha_channel[:, :, np.newaxis] +
+                        white_bg * (1 - alpha_channel[:, :, np.newaxis])).astype(np.uint8)
+    elif img_ori_temp is not None and len(img_ori_temp.shape) == 2:
+        img_ori_temp = cv2.cvtColor(img_ori_temp, cv2.COLOR_GRAY2BGR)
+
     target_h, target_w = img_ori_temp.shape[:2]
 
-    # 🌟 修复 1：强制转换为整数
+    # 强制转换为整数
     target_h, target_w = int(target_h / 3), int(target_w / 3)
-    #
+
     image_ori_temp = cv2.resize(img_ori_temp, (target_w, target_h), interpolation=cv2.INTER_AREA)
     base_name, ext = os.path.splitext(ori_image_path)
-    temp_ori_path = f"{base_name}_resized{ext}"
+    # 保存成 jpg 避免任何多余的 alpha 通道干扰下游
+    temp_ori_path = f"{base_name}_white_resized.jpg"
     cv2.imwrite(temp_ori_path, image_ori_temp)
     ori_image_path = temp_ori_path
 
@@ -550,7 +608,7 @@ def main(ori_image_path, gen_image_path,reconstructor, annotation_file):
     mesh_save_path = os.path.join(dir_name, "whole_body_mesh.obj")
 
     try:
-        mesh_save_path, pred_joints_3d, pred_cam, mesh = reconstructor.predict_mesh(temp_gen_path, mesh_save_path)
+        mesh_save_path, pred_joints_3d, pred_cam, mesh, pred_joints_2d = reconstructor.predict_mesh(temp_gen_path, mesh_save_path)
     except SystemExit as e:  # 建议抓取通用 Exception 兜底
         print(e)
         return 0, 0, 0
@@ -561,6 +619,9 @@ def main(ori_image_path, gen_image_path,reconstructor, annotation_file):
         'focal': global_focal,
         'princpt': np.array([global_cx, global_cy])
     }
+
+    vis_save_path = os.path.join(dir_name, "keypoints_comparison.jpg")
+    visualize_keypoints_comparison(ori_image_path, pred_joints_2d, pred_joints_3d, global_cam, vis_save_path)
     project_mesh_overlay(ori_image_path, temp_gen_path, mesh, global_cam, dir_name)
     cut_tasks = []
     for i in range(23, 31):

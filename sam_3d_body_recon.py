@@ -118,4 +118,19 @@ class ReconstructionEngine:
                 'pelvis': (joints_3d[11] + joints_3d[12]) / 2.0,
                 'neck': (joints_3d[5] + joints_3d[6]) / 2.0
             }
-        return save_path, pred_joints_dict, global_cam, mesh
+
+        joints_2d = person_data.get("pred_keypoints_2d")
+        if joints_2d is not None and hasattr(joints_2d, 'cpu'):
+            joints_2d = joints_2d.detach().cpu().numpy()
+
+        pred_joints_2d_dict = {}
+        if joints_2d is not None:
+            pred_joints_2d_dict = {
+                'nose': joints_2d[0], 'left_eye': joints_2d[1], 'right_eye': joints_2d[2],
+                'left_ear': joints_2d[3], 'right_ear': joints_2d[4], 'left_shoulder': joints_2d[5],
+                'right_shoulder': joints_2d[6], 'left_elbow': joints_2d[7], 'right_elbow': joints_2d[8],
+                'left_wrist': joints_2d[9], 'right_wrist': joints_2d[10], 'left_hip': joints_2d[11],
+                'right_hip': joints_2d[12], 'left_knee': joints_2d[13], 'right_knee': joints_2d[14],
+                'left_ankle': joints_2d[15], 'right_ankle': joints_2d[16]
+            }
+        return save_path, pred_joints_dict, global_cam, mesh, pred_joints_2d_dict
