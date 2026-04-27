@@ -121,6 +121,45 @@ METAINFO = {
     ],
 }
 
+def visualize_raw_keypoints(img_path, raw_joints_2d, raw_joints_3d, global_cam, out_path, search_range=35):
+    """
+    不管名字，直接遍历底层数组，把 Index (0, 1, 2...) 画在图上找手腕
+    """
+    img = cv2.imread(img_path)
+    if img is None:
+        return
+
+    focal = global_cam['focal']
+    princpt = global_cam['princpt']
+
+    # 限制画点的数量，防止 70 个点把人脸和身体全糊住
+    num_points = min(search_range, len(raw_joints_2d))
+
+    for i in range(num_points):
+        # 🔴 1. 画 2D 原生点 (红色)
+        pt2d = raw_joints_2d[i]
+        cv2.circle(img, (int(pt2d[0]), int(pt2d[1])), 4, (0, 0, 255), -1)
+        # 直接写上数字 ID
+        cv2.putText(img, f"{i}", (int(pt2d[0]) - 10, int(pt2d[1]) - 10),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.45, (0, 0, 255), 1)
+
+        # 🔵 2. 画 3D 投影点 (蓝色，用来双重确认)
+        if raw_joints_3d is not None and i < len(raw_joints_3d):
+            vert = raw_joints_3d[i]
+            if vert[2] > 1e-5:
+                proj_x = focal[0] * (vert[0] / vert[2]) + princpt[0]
+                proj_y = focal[1] * (vert[1] / vert[2]) + princpt[1]
+                cv2.circle(img, (int(proj_x), int(proj_y)), 4, (255, 0, 0), -1)
+                cv2.putText(img, f"{i}", (int(proj_x) + 5, int(proj_y) + 15),
+                            cv2.FONT_HERSHEY_SIMPLEX, 0.45, (255, 0, 0), 1)
+
+    # 图例
+    cv2.putText(img, "Red: 2D Raw Index", (15, 25), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 0, 255), 2)
+    cv2.putText(img, "Blue: 3D Proj Index", (15, 50), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 0, 0), 2)
+
+    cv2.imwrite(out_path, img)
+    print(f"      🔎 原始索引雷达图已保存，快去抓出手腕的 ID 吧！: {out_path}")
+
 def visualize_keypoints_comparison(img_path, pred_joints_2d, pred_joints_3d, global_cam, out_path):
     """
     将 2D 预测点(红) 与 3D 投影点(蓝) 画在同一张图上，并标注 0-16 的序号
@@ -639,8 +678,8 @@ def main(ori_image_path, gen_image_path, reconstructor, annotation_file):
     mesh_save_path = os.path.join(dir_name, "whole_body_mesh.obj")
 
     try:
-        mesh_save_path, pred_joints_3d, pred_cam, mesh, pred_joints_2d = reconstructor.predict_mesh(temp_gen_path,
-                                                                                                    mesh_save_path)
+        mesh_save_path, pred_joints_3d, pred_cam, mesh, raw_joints_2d, raw_joints_3d = reconstructor.predict_mesh(
+            temp_gen_path, mesh_save_path)
     except SystemExit as e:
         print(e)
         return 0, 0, 0
@@ -654,10 +693,10 @@ def main(ori_image_path, gen_image_path, reconstructor, annotation_file):
     }
 
     # 绘制可视化对比图 (现在原图和生成图都是干净的白底了)
-    vis_save_path = os.path.join(dir_name, "keypoints_comparison.jpg")
-    visualize_keypoints_comparison(ori_image_path, pred_joints_2d, pred_joints_3d, global_cam, vis_save_path)
-    project_mesh_overlay(ori_image_path, temp_gen_path, mesh, global_cam, dir_name)
+    vis_save_path = os.path.join(dir_name, "raw_index_radar.jpg")
+    visualize_raw_keypoints(ori_image_path, raw_joints_2d, raw_joints_3d, global_cam, vis_save_path, search_range=35)
 
+    project_mesh_overlay(ori_image_path, temp_gen_path, mesh, global_cam, dir_name)
     cut_tasks = []
     for i in range(23, 31):
         if types_orig[i] == 0:

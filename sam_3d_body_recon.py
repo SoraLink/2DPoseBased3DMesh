@@ -123,6 +123,17 @@ class ReconstructionEngine:
         if joints_2d is not None and hasattr(joints_2d, 'cpu'):
             joints_2d = joints_2d.detach().cpu().numpy()
 
+        joints_2d_raw = person_data.get("pred_keypoints_2d")
+        if joints_2d_raw is not None and hasattr(joints_2d_raw, 'cpu'):
+            joints_2d_raw = joints_2d_raw.detach().cpu().numpy()
+
+        joints_3d_raw = person_data.get("pred_keypoints_3d")
+        if joints_3d_raw is not None and hasattr(joints_3d_raw, 'cpu'):
+            joints_3d_raw = joints_3d_raw.detach().cpu().numpy()
+
+        if joints_3d_raw is not None and cam_t is not None:
+            joints_3d_raw = joints_3d_raw + cam_t  # 🌟 保持相机绝对坐标系转换
+
         pred_joints_2d_dict = {}
         if joints_2d is not None:
             pred_joints_2d_dict = {
@@ -133,4 +144,4 @@ class ReconstructionEngine:
                 'right_hip': joints_2d[12], 'left_knee': joints_2d[13], 'right_knee': joints_2d[14],
                 'left_ankle': joints_2d[15], 'right_ankle': joints_2d[16]
             }
-        return save_path, pred_joints_dict, global_cam, mesh, pred_joints_2d_dict
+        return save_path, pred_joints_dict, global_cam, mesh, pred_joints_2d_dict, joints_2d_raw, joints_3d_raw
