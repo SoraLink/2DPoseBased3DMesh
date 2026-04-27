@@ -144,4 +144,4 @@ class ReconstructionEngine:
                 'right_hip': joints_2d[12], 'left_knee': joints_2d[13], 'right_knee': joints_2d[14],
                 'left_ankle': joints_2d[15], 'right_ankle': joints_2d[16]
             }
-        return save_path, pred_joints_dict, global_cam, mesh, pred_joints_2d_dict, joints_2d_raw, joints_3d_raw
+        return save_path, pred_joints_dict, global_cam, mesh, joints_2d_raw, joints_3d_raw
