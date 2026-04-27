@@ -567,51 +567,84 @@ def load_gt_mask(image_path):
 
     return mask
 
-def main(ori_image_path, gen_image_path,reconstructor, annotation_file):
+
+def main(ori_image_path, gen_image_path, reconstructor, annotation_file):
     kpts_orig, kpts, types_orig = read_kpts_annotation(ori_image_path, annotation_file)
 
     for i in range(len(kpts_orig)):
         kpts_orig[i][0] /= 3.0  # x 坐标缩小
         kpts_orig[i][1] /= 3.0  # y 坐标缩小
 
-    img_ori_temp = cv2.imread(ori_image_path, cv2.IMREAD_UNCHANGED)
-    if img_ori_temp is not None and img_ori_temp.shape[-1] == 4:
-        # 提取 Alpha 通道作为蒙版 (0~1)
-        alpha_channel = img_ori_temp[:, :, 3] / 255.0
-        # 创建一个全白的背景板
-        white_bg = np.ones_like(img_ori_temp[:, :, :3]) * 255
-        # 按蒙版比例将前景物体和白色背景混合
-        img_ori_temp = (img_ori_temp[:, :, :3] * alpha_channel[:, :, np.newaxis] +
-                        white_bg * (1 - alpha_channel[:, :, np.newaxis])).astype(np.uint8)
-    elif img_ori_temp is not None and len(img_ori_temp.shape) == 2:
-        img_ori_temp = cv2.cvtColor(img_ori_temp, cv2.COLOR_GRAY2BGR)
+    # ============================================================
+    # 1. 提取真实的 GT Mask (基于原图 Alpha 通道或灰度图) 算 mIoU 用
+    # ============================================================
+    img_ori_raw = cv2.imread(ori_image_path, cv2.IMREAD_UNCHANGED)
+    if img_ori_raw is None:
+        return 0, 0, 0
 
-    target_h, target_w = img_ori_temp.shape[:2]
+    target_h, target_w = int(img_ori_raw.shape[0] / 3), int(img_ori_raw.shape[1] / 3)
 
-    # 强制转换为整数
-    target_h, target_w = int(target_h / 3), int(target_w / 3)
+    if len(img_ori_raw.shape) == 3 and img_ori_raw.shape[2] == 4:
+        alpha_channel = img_ori_raw[:, :, 3]
+        _, raw_mask = cv2.threshold(alpha_channel, 0, 255, cv2.THRESH_BINARY)
+    else:
+        gray = cv2.cvtColor(img_ori_raw, cv2.COLOR_BGR2GRAY)
+        _, raw_mask = cv2.threshold(gray, 0, 255, cv2.THRESH_BINARY)
 
-    image_ori_temp = cv2.resize(img_ori_temp, (target_w, target_h), interpolation=cv2.INTER_AREA)
-    base_name, ext = os.path.splitext(ori_image_path)
-    # 保存成 jpg 避免任何多余的 alpha 通道干扰下游
-    temp_ori_path = f"{base_name}_white_resized.jpg"
-    cv2.imwrite(temp_ori_path, image_ori_temp)
+    mask_gt_resized = cv2.resize(raw_mask, (target_w, target_h), interpolation=cv2.INTER_NEAREST)
+
+    # ============================================================
+    # 2. 制作白底的原图 (Ori)
+    # ============================================================
+    if len(img_ori_raw.shape) == 3 and img_ori_raw.shape[2] == 4:
+        alpha_norm = img_ori_raw[:, :, 3] / 255.0
+        white_bg = np.ones_like(img_ori_raw[:, :, :3]) * 255
+        img_ori_white = (img_ori_raw[:, :, :3] * alpha_norm[:, :, np.newaxis] +
+                         white_bg * (1 - alpha_norm[:, :, np.newaxis])).astype(np.uint8)
+    else:
+        img_ori_white = cv2.cvtColor(img_ori_raw, cv2.COLOR_GRAY2BGR) if len(img_ori_raw.shape) == 2 else img_ori_raw[
+            :, :, :3]
+
+    image_ori_resized = cv2.resize(img_ori_white, (target_w, target_h), interpolation=cv2.INTER_AREA)
+    base_name_ori, _ = os.path.splitext(ori_image_path)
+    temp_ori_path = f"{base_name_ori}_white_resized.jpg"
+    cv2.imwrite(temp_ori_path, image_ori_resized)
     ori_image_path = temp_ori_path
 
-    img_gen_temp = cv2.imread(gen_image_path)
-    img_gen_resized = cv2.resize(img_gen_temp, (target_w, target_h), interpolation=cv2.INTER_AREA)
-    base_name, ext = os.path.splitext(gen_image_path)
-    temp_gen_path = f"{base_name}_resized{ext}"
+    # ============================================================
+    # 3. 🌟 新增：制作白底的生成图 (Gen)
+    # ============================================================
+    img_gen_raw = cv2.imread(gen_image_path, cv2.IMREAD_UNCHANGED)
+    if img_gen_raw is not None and len(img_gen_raw.shape) == 3 and img_gen_raw.shape[2] == 4:
+        alpha_norm_gen = img_gen_raw[:, :, 3] / 255.0
+        white_bg_gen = np.ones_like(img_gen_raw[:, :, :3]) * 255
+        img_gen_white = (img_gen_raw[:, :, :3] * alpha_norm_gen[:, :, np.newaxis] +
+                         white_bg_gen * (1 - alpha_norm_gen[:, :, np.newaxis])).astype(np.uint8)
+    elif img_gen_raw is not None:
+        img_gen_white = cv2.cvtColor(img_gen_raw, cv2.COLOR_GRAY2BGR) if len(img_gen_raw.shape) == 2 else img_gen_raw[
+            :, :, :3]
+    else:
+        # 兜底
+        img_gen_white = np.ones((target_h, target_w, 3), dtype=np.uint8) * 255
+
+    img_gen_resized = cv2.resize(img_gen_white, (target_w, target_h), interpolation=cv2.INTER_AREA)
+    base_name_gen, _ = os.path.splitext(gen_image_path)
+    temp_gen_path = f"{base_name_gen}_white_resized.jpg"  # 强制存为 JPG 抹除透明度
     cv2.imwrite(temp_gen_path, img_gen_resized)
 
+    # ============================================================
+    # 4. 模型推理与后续逻辑
+    # ============================================================
     dir_name = os.path.dirname(temp_gen_path)
     mesh_save_path = os.path.join(dir_name, "whole_body_mesh.obj")
 
     try:
-        mesh_save_path, pred_joints_3d, pred_cam, mesh, pred_joints_2d = reconstructor.predict_mesh(temp_gen_path, mesh_save_path)
-    except SystemExit as e:  # 建议抓取通用 Exception 兜底
+        mesh_save_path, pred_joints_3d, pred_cam, mesh, pred_joints_2d = reconstructor.predict_mesh(temp_gen_path,
+                                                                                                    mesh_save_path)
+    except SystemExit as e:
         print(e)
         return 0, 0, 0
+
     global_focal = pred_cam['focal']
     global_cx = pred_cam['princpt'][0]
     global_cy = pred_cam['princpt'][1]
@@ -620,34 +653,30 @@ def main(ori_image_path, gen_image_path,reconstructor, annotation_file):
         'princpt': np.array([global_cx, global_cy])
     }
 
+    # 绘制可视化对比图 (现在原图和生成图都是干净的白底了)
     vis_save_path = os.path.join(dir_name, "keypoints_comparison.jpg")
     visualize_keypoints_comparison(ori_image_path, pred_joints_2d, pred_joints_3d, global_cam, vis_save_path)
     project_mesh_overlay(ori_image_path, temp_gen_path, mesh, global_cam, dir_name)
+
     cut_tasks = []
     for i in range(23, 31):
-        # 判断: 只有 type == 0 才是有效残肢点，且确保坐标数组够长
         if types_orig[i] == 0:
             res_name = METAINFO['keypoint_info'][i]['name']
-
-            # 获取 2D 坐标 (假设 kpts_orig 的格式是 [x, y, conf])
             pt_2d_orig = kpts_orig[i][0:2]
             pt_2d_orig_homo = np.array([pt_2d_orig[0], pt_2d_orig[1]])
-            # 查表找到对应的 3D 骨骼起点和终点
             if res_name in RES_BONE_MAPPING:
                 start_joint_name, end_joint_name = RES_BONE_MAPPING[res_name]
-
                 start_3d = pred_joints_3d[start_joint_name]
                 end_3d = pred_joints_3d[end_joint_name]
 
-                # 组装切割任务
                 cut_tasks.append({
                     'name': res_name,
                     'pt_2d': pt_2d_orig_homo,
                     'start_3d': start_3d,
                     'end_3d': end_3d
                 })
+
     if cut_tasks:
-        # 🌟 直接使用原作者推导出的官方全局相机内参
         global_focal = pred_cam['focal']
         global_cx = pred_cam['princpt'][0]
         global_cy = pred_cam['princpt'][1]
@@ -663,21 +692,32 @@ def main(ori_image_path, gen_image_path,reconstructor, annotation_file):
         for task in cut_tasks:
             if 'cut_origin' in task:
                 pred_joints_3d[task['name']] = task['cut_origin']
+
         global_cam = {
             'focal': global_focal,
             'princpt': np.array([global_cx, global_cy])
         }
-        orig_proj_path, pred_mask_orig, gen_proj_path, pred_mask_gen = project_mesh_overlay(ori_image_path, temp_gen_path, mesh, global_cam, dir_name)
-        mask_gt = load_gt_mask(ori_image_path)
-        miou_score = calculate_miou(pred_mask_orig, mask_gt)
+
+        orig_proj_path, pred_mask_orig, gen_proj_path, pred_mask_gen = project_mesh_overlay(ori_image_path,
+                                                                                            temp_gen_path, mesh,
+                                                                                            global_cam, dir_name)
+
+        # 🚨 使用一开始保留下来的真实 Mask，防止 mIoU 受白底影响变 0
+        miou_score = calculate_miou(pred_mask_orig, mask_gt_resized)
         print(f"      -> miou_score: {miou_score:.4f}")
+
         INTACT_MAPPING = {METAINFO['keypoint_info'][i]['name']: i for i in range(0, 17)}
         RES_MAPPING = {METAINFO['keypoint_info'][i]['name']: i for i in range(23, 31)}
         mpjpe_intact = calculate_2d_mpjpe(pred_joints_3d, kpts_orig, global_cam, INTACT_MAPPING)
         mpjpe_residual = calculate_2d_mpjpe(pred_joints_3d, kpts_orig, global_cam, RES_MAPPING)
+
         print(f"📊 [量化评估] 完整关节 2D MPJPE: {mpjpe_intact:.2f} pixels")
         print(f"📊 [量化评估] 残肢端点 2D MPJPE: {mpjpe_residual:.2f} pixels")
+
         return miou_score, mpjpe_intact, mpjpe_residual
+
+    # 如果没有 cut tasks，随便返回个值或者 0
+    return 0, 0, 0
 
 
 if __name__ == "__main__":
