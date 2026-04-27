@@ -101,21 +101,26 @@ class ReconstructionEngine:
                 'right_eye': joints_3d[2],
                 'left_ear': joints_3d[3],
                 'right_ear': joints_3d[4],
+
                 'left_shoulder': joints_3d[5],
                 'right_shoulder': joints_3d[6],
                 'left_elbow': joints_3d[7],
                 'right_elbow': joints_3d[8],
-                'left_wrist': joints_3d[9],
-                'right_wrist': joints_3d[10],
-                'left_hip': joints_3d[11],
-                'right_hip': joints_3d[12],
-                'left_knee': joints_3d[13],
-                'right_knee': joints_3d[14],
-                'left_ankle': joints_3d[15],
-                'right_ankle': joints_3d[16],
+                'left_wrist': joints_3d[70],  # or 69 depending on implementation
+                'right_wrist': joints_3d[41],
 
-                # SMPLest-X 可能还需要这两个基础骨骼点，用中点生成即可
-                'pelvis': (joints_3d[11] + joints_3d[12]) / 2.0,
+                # 🚨 错位发生地：手腕不知道去哪了，9和10直接就是跨部！
+                'left_hip': joints_3d[9],
+                'right_hip': joints_3d[10],
+
+                # 🚨 膝盖和脚踝全部提前了2个位置
+                'left_knee': joints_3d[11],
+                'right_knee': joints_3d[12],
+                'left_ankle': joints_3d[13],
+                'right_ankle': joints_3d[14],
+
+                # 衍生点
+                'pelvis': (joints_3d[9] + joints_3d[10]) / 2.0,
                 'neck': (joints_3d[5] + joints_3d[6]) / 2.0
             }
 
