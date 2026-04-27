@@ -106,7 +106,7 @@ class ReconstructionEngine:
                 'right_shoulder': joints_3d[6],
                 'left_elbow': joints_3d[7],
                 'right_elbow': joints_3d[8],
-                'left_wrist': joints_3d[70],  # or 69 depending on implementation
+                'left_wrist': joints_3d[62],
                 'right_wrist': joints_3d[41],
 
                 # 🚨 错位发生地：手腕不知道去哪了，9和10直接就是跨部！
