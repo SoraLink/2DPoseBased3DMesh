@@ -160,7 +160,7 @@ def visualize_raw_keypoints(img_path, raw_joints_2d, raw_joints_3d, global_cam, 
     cv2.imwrite(out_path, img)
     print(f"      🔎 原始索引雷达图已保存，快去抓出手腕的 ID 吧！: {out_path}")
 
-def visualize_keypoints_comparison(img_path, pred_joints_2d, pred_joints_3d, global_cam, out_path):
+def visualize_keypoints_comparison(img_path, pred_joints_3d, global_cam, out_path):
     """
     将 2D 预测点(红) 与 3D 投影点(蓝) 画在同一张图上，并标注 0-16 的序号
     """
@@ -180,14 +180,6 @@ def visualize_keypoints_comparison(img_path, pred_joints_2d, pred_joints_3d, glo
     ]
 
     for i, key in enumerate(coco_keys):
-        # 🔴 1. 绘制模型预测的纯 2D 点 (红色)
-        if key in pred_joints_2d:
-            pt2d = pred_joints_2d[key]
-            cv2.circle(img, (int(pt2d[0]), int(pt2d[1])), 4, (0, 0, 255), -1)
-            # 在点的左上方写上编号
-            cv2.putText(img, f"2D:{i}", (int(pt2d[0]) - 10, int(pt2d[1]) - 10),
-                        cv2.FONT_HERSHEY_SIMPLEX, 0.4, (0, 0, 255), 1)
-
         # 🔵 2. 绘制 3D 坐标强行投影回 2D 的点 (蓝色)
         if key in pred_joints_3d:
             vert = pred_joints_3d[key]
@@ -678,7 +670,7 @@ def main(ori_image_path, gen_image_path, reconstructor, annotation_file):
     mesh_save_path = os.path.join(dir_name, "whole_body_mesh.obj")
 
     try:
-        mesh_save_path, pred_joints_3d, pred_cam, mesh, raw_joints_2d, raw_joints_3d = reconstructor.predict_mesh(
+        mesh_save_path, pred_joints_3d, pred_cam, mesh = reconstructor.predict_mesh(
             temp_gen_path, mesh_save_path)
     except SystemExit as e:
         print(e)
@@ -693,9 +685,8 @@ def main(ori_image_path, gen_image_path, reconstructor, annotation_file):
     }
 
     # 绘制可视化对比图 (现在原图和生成图都是干净的白底了)
-    vis_save_path = os.path.join(dir_name, "raw_index_radar.jpg")
-    visualize_raw_keypoints(ori_image_path, raw_joints_2d, raw_joints_3d, global_cam, vis_save_path, search_range=35)
-
+    vis_save_path = os.path.join(dir_name, "keypoints_comparison.jpg")
+    visualize_keypoints_comparison(ori_image_path, pred_joints_3d, global_cam, vis_save_path)
     project_mesh_overlay(ori_image_path, temp_gen_path, mesh, global_cam, dir_name)
     cut_tasks = []
     for i in range(23, 31):
