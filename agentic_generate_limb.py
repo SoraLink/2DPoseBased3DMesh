@@ -464,6 +464,287 @@ class LimbCompositingAgent:
 
         return kpts[idx, :2].astype(np.float32)
 
+    def _gen_conf_color(self, conf):
+        """
+        Color for generated pose keypoints based on confidence.
+        high conf -> green, medium -> yellow, low -> red
+        """
+        if conf >= 0.5:
+            return (0, 180, 0)
+        elif conf >= 0.2:
+            return (0, 215, 255)
+        else:
+            return (0, 0, 255)
+
+    def _orig_kpt_color(self, idx, kpt_types=None):
+        """
+        Color for original annotated keypoints.
+        - normal body keypoints: green
+        - prosthetic-related points (type=1): orange
+        - residual endpoint keypoints 23-30 with type=0: magenta
+        """
+        if kpt_types is not None and idx < len(kpt_types):
+            t = kpt_types[idx]
+            if t == 1:
+                return (0, 165, 255)  # orange
+            if idx >= 23 and t == 0:
+                return (255, 0, 255)  # magenta
+        if idx >= 23:
+            return (255, 0, 255)
+        return (0, 180, 0)
+
+    def _is_valid_orig_draw_kpt(self, kpts, idx, kpt_types=None):
+        """
+        Decide whether an original annotated keypoint should be drawn.
+        """
+        if idx >= len(kpts):
+            return False
+
+        # third dim should exist and be > 0
+        if kpts[idx][2] <= 0:
+            return False
+
+        if kpt_types is not None and idx < len(kpt_types):
+            # type=2 means absent
+            if kpt_types[idx] == 2:
+                return False
+            # for residual endpoints 23-30, only draw if type==0 (exists)
+            if idx >= 23 and kpt_types[idx] != 0:
+                return False
+
+        return True
+
+    def _is_valid_gen_draw_kpt(self, kpts, idx, conf_thr=None):
+        """
+        Decide whether a generated-image predicted keypoint should be drawn.
+        """
+        if conf_thr is None:
+            conf_thr = getattr(self, "conf_thr", 0.10)
+
+        if idx >= len(kpts):
+            return False
+
+        return kpts[idx][2] > conf_thr
+
+    def _draw_pose_overlay(
+            self,
+            image,
+            kpts,
+            mode="gen",
+            kpt_types=None,
+            title=None,
+            conf_thr=None,
+            show_indices=True,
+    ):
+        """
+        Draw pose keypoints and skeleton on one image.
+
+        mode:
+            - "orig": draw original annotation
+            - "gen": draw generated pose estimation
+        """
+        if conf_thr is None:
+            conf_thr = getattr(self, "conf_thr", 0.10)
+
+        canvas = image.copy()
+
+        # Standard body skeleton edges (main 17-body structure)
+        skeleton_edges = [
+            (0, 1), (0, 2), (1, 3), (2, 4),
+            (5, 6),
+            (5, 7), (7, 9),
+            (6, 8), (8, 10),
+            (5, 11), (6, 12),
+            (11, 12),
+            (11, 13), (13, 15),
+            (12, 14), (14, 16),
+        ]
+
+        def is_valid(idx):
+            if mode == "orig":
+                return self._is_valid_orig_draw_kpt(kpts, idx, kpt_types=kpt_types)
+            else:
+                return self._is_valid_gen_draw_kpt(kpts, idx, conf_thr=conf_thr)
+
+        def get_color(idx):
+            if mode == "orig":
+                return self._orig_kpt_color(idx, kpt_types=kpt_types)
+            else:
+                conf = float(kpts[idx][2]) if idx < len(kpts) else 0.0
+                return self._gen_conf_color(conf)
+
+        # draw skeleton for standard 0-16 body keypoints
+        for a, b in skeleton_edges:
+            if a >= len(kpts) or b >= len(kpts):
+                continue
+            if not is_valid(a) or not is_valid(b):
+                continue
+
+            pa = self._to_int_tuple(kpts[a, :2])
+            pb = self._to_int_tuple(kpts[b, :2])
+
+            if mode == "orig":
+                edge_color = (180, 180, 180)
+            else:
+                edge_color = (120, 220, 120)
+
+            cv2.line(canvas, pa, pb, edge_color, 2)
+
+        # draw all valid keypoints
+        for idx in range(len(kpts)):
+            if not is_valid(idx):
+                continue
+
+            p = self._to_int_tuple(kpts[idx, :2])
+            color = get_color(idx)
+
+            cv2.circle(canvas, p, 4, color, -1)
+
+            if show_indices:
+                if mode == "gen":
+                    conf = float(kpts[idx][2])
+                    label = f"{idx}:{conf:.2f}"
+                else:
+                    label = f"{idx}"
+
+                cv2.putText(
+                    canvas,
+                    label,
+                    (p[0] + 4, p[1] - 4),
+                    cv2.FONT_HERSHEY_SIMPLEX,
+                    0.40,
+                    color,
+                    1,
+                    cv2.LINE_AA,
+                )
+
+        if title is not None:
+            cv2.putText(
+                canvas,
+                title,
+                (12, 28),
+                cv2.FONT_HERSHEY_SIMPLEX,
+                0.72,
+                (255, 255, 255),
+                2,
+                cv2.LINE_AA,
+            )
+
+        return canvas
+
+    def _save_pose_estimation_comparison_vis(
+            self,
+            orig_image_path,
+            gen_image_path,
+            kpts_orig,
+            kpts_gen,
+            save_path,
+            kpt_types_orig=None,
+            conf_thr=None,
+            show_indices=True,
+    ):
+        """
+        Save one comparison image:
+        - left: original image + original annotation
+        - right: generated image + pose estimation result
+        """
+        if conf_thr is None:
+            conf_thr = getattr(self, "conf_thr", 0.10)
+
+        orig = cv2.imread(orig_image_path)
+        gen = cv2.imread(gen_image_path)
+
+        if orig is None:
+            raise ValueError(f"Cannot read original image: {orig_image_path}")
+        if gen is None:
+            raise ValueError(f"Cannot read generated image: {gen_image_path}")
+
+        # keep both panels in the same size
+        if orig.shape[:2] != gen.shape[:2]:
+            gen = cv2.resize(gen, (orig.shape[1], orig.shape[0]), interpolation=cv2.INTER_AREA)
+
+        left = self._draw_pose_overlay(
+            image=orig,
+            kpts=np.asarray(kpts_orig, dtype=np.float32),
+            mode="orig",
+            kpt_types=kpt_types_orig,
+            title="Original annotation",
+            conf_thr=conf_thr,
+            show_indices=show_indices,
+        )
+
+        right = self._draw_pose_overlay(
+            image=gen,
+            kpts=np.asarray(kpts_gen, dtype=np.float32),
+            mode="gen",
+            kpt_types=None,
+            title="Generated pose estimation",
+            conf_thr=conf_thr,
+            show_indices=show_indices,
+        )
+
+        h = left.shape[0]
+        panel_w = 420
+        panel = np.ones((h, panel_w, 3), dtype=np.uint8) * 255
+
+        # summary stats
+        orig_valid = 0
+        for i in range(len(kpts_orig)):
+            if self._is_valid_orig_draw_kpt(kpts_orig, i, kpt_types=kpt_types_orig):
+                orig_valid += 1
+
+        gen_valid = 0
+        low_conf = []
+        for i in range(len(kpts_gen)):
+            if self._is_valid_gen_draw_kpt(kpts_gen, i, conf_thr=conf_thr):
+                gen_valid += 1
+                conf = float(kpts_gen[i][2])
+                low_conf.append((i, conf))
+
+        low_conf = sorted(low_conf, key=lambda x: x[1])
+
+        y = 28
+        cv2.putText(panel, "Pose Estimation Debug", (12, y),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.72, (0, 0, 0), 2, cv2.LINE_AA)
+        y += 34
+        cv2.putText(panel, f"orig valid kpts = {orig_valid}", (12, y),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.55, (0, 0, 0), 1, cv2.LINE_AA)
+        y += 24
+        cv2.putText(panel, f"gen valid kpts  = {gen_valid}", (12, y),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.55, (0, 0, 0), 1, cv2.LINE_AA)
+        y += 24
+        cv2.putText(panel, f"conf_thr = {conf_thr:.2f}", (12, y),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.55, (0, 0, 0), 1, cv2.LINE_AA)
+
+        y += 34
+        cv2.putText(panel, "Lowest-confidence generated kpts:", (12, y),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.52, (0, 0, 0), 1, cv2.LINE_AA)
+        y += 22
+
+        for idx, conf in low_conf[:20]:
+            color = self._gen_conf_color(conf)
+            cv2.putText(panel, f"kpt {idx:02d}: {conf:.3f}", (16, y),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.48, color, 1, cv2.LINE_AA)
+            y += 20
+            if y > h - 90:
+                break
+
+        # legend
+        cv2.putText(panel, "Legend:", (12, h - 96),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.52, (0, 0, 0), 1, cv2.LINE_AA)
+        cv2.putText(panel, "Left  = original annotation", (16, h - 74),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.46, (0, 0, 0), 1, cv2.LINE_AA)
+        cv2.putText(panel, "Right = generated pose estimation", (16, h - 54),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.46, (0, 0, 0), 1, cv2.LINE_AA)
+        cv2.putText(panel, "Green/Yellow/Red = gen conf high/mid/low", (16, h - 34),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.44, (0, 0, 0), 1, cv2.LINE_AA)
+        cv2.putText(panel, "Magenta = residual endpoints in annotation", (16, h - 14),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.44, (0, 0, 0), 1, cv2.LINE_AA)
+
+        canvas = np.hstack([left, right, panel])
+        cv2.imwrite(save_path, canvas)
+        return save_path
+
     def evaluate_pose_geometric(
             self,
             kpts_orig,
@@ -921,6 +1202,18 @@ class LimbCompositingAgent:
             except Exception as e:
                 print(f"❌ 生成图 pose extraction 失败: {e}")
                 continue
+            pose_est_vis_path = os.path.join(save_dir, f"attempt_{attempt}_pose_estimation_debug.png")
+            self._save_pose_estimation_comparison_vis(
+                orig_image_path=image_path,
+                gen_image_path=gen_image_path,
+                kpts_orig=kpts_orig,
+                kpts_gen=kpts_gen,
+                save_path=pose_est_vis_path,
+                kpt_types_orig=kpt_types_orig,
+                conf_thr=0.10,
+                show_indices=True,
+            )
+            print(f"   pose estimation debug: {pose_est_vis_path}")
 
             pose_eval = self.evaluate_pose_geometric(
                 kpts_orig=kpts_orig,
