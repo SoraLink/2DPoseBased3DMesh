@@ -29,6 +29,335 @@ class LimbCompositingAgent:
         self.pose_extractor = pose_extractor
         self.eval_model = eval_model
 
+    def _to_int_tuple(self, p):
+        return int(round(float(p[0]))), int(round(float(p[1])))
+
+    def _metric_color(self, value, thr):
+        # 绿: 很安全；黄: 接近阈值；红: 超阈值
+        if value <= thr * 0.5:
+            return (0, 180, 0)
+        elif value <= thr:
+            return (0, 215, 255)
+        else:
+            return (0, 0, 255)
+
+    def _save_pose_displacement_vis(
+            self,
+            orig_image_path,
+            gen_image_path,
+            kpts_orig,
+            kpts_gen,
+            target_indices,
+            scale,
+            E_pose,
+            pose_ok,
+            save_path,
+            conf_thr=None,
+            pose_tau=None,
+    ):
+        """
+        可视化非目标关键点的位移。
+        左侧：生成图上的 overlay（蓝色=原点，彩色=生成点，线段=位移）
+        右侧：位移最大的 keypoints 列表
+        """
+        if conf_thr is None:
+            conf_thr = getattr(self, "conf_thr", 0.10)
+        if pose_tau is None:
+            pose_tau = getattr(self, "pose_tau", 0.045)
+
+        orig = cv2.imread(orig_image_path)
+        gen = cv2.imread(gen_image_path)
+        if orig is None or gen is None:
+            return None
+
+        # 保证同一坐标系
+        if orig.shape[:2] != gen.shape[:2]:
+            gen = cv2.resize(gen, (orig.shape[1], orig.shape[0]), interpolation=cv2.INTER_AREA)
+
+        vis = gen.copy()
+        records = []
+
+        num_kpts = min(len(kpts_orig), len(kpts_gen))
+        for i in range(num_kpts):
+            if i in target_indices:
+                continue
+
+            p_orig = self._safe_get_point(kpts_orig, i, conf_thr=conf_thr)
+            p_gen = self._safe_get_point(kpts_gen, i, conf_thr=conf_thr)
+            if p_orig is None or p_gen is None:
+                continue
+
+            dist_norm = float(np.linalg.norm(p_gen - p_orig) / max(scale, 1e-6))
+            color = self._metric_color(dist_norm, pose_tau)
+
+            p1 = self._to_int_tuple(p_orig)
+            p2 = self._to_int_tuple(p_gen)
+
+            cv2.circle(vis, p1, 3, (255, 0, 0), -1)  # 原图点：蓝
+            cv2.circle(vis, p2, 4, color, -1)  # 生成图点：按阈值上色
+            cv2.line(vis, p1, p2, color, 1)
+
+            # 在图上只标注最大的几个，避免太乱
+            records.append((i, dist_norm, p1, p2))
+
+        records_sorted = sorted(records, key=lambda x: x[1], reverse=True)
+
+        # 给 top-k 最大位移点加编号标注
+        for rank, (idx, dist_norm, p1, p2) in enumerate(records_sorted[:12]):
+            color = self._metric_color(dist_norm, pose_tau)
+            cv2.putText(
+                vis,
+                f"{idx}:{dist_norm:.3f}",
+                (p2[0] + 4, p2[1] - 4),
+                cv2.FONT_HERSHEY_SIMPLEX,
+                0.42,
+                color,
+                1,
+                cv2.LINE_AA,
+            )
+
+        h, w = vis.shape[:2]
+        panel_w = 420
+        panel = np.ones((h, panel_w, 3), dtype=np.uint8) * 255
+
+        y = 28
+        cv2.putText(panel, "Pose Displacement Debug", (12, y),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.72, (0, 0, 0), 2, cv2.LINE_AA)
+        y += 32
+        cv2.putText(panel, f"E_pose = {E_pose:.4f}", (12, y),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.62, (0, 0, 0), 2, cv2.LINE_AA)
+        y += 28
+        cv2.putText(panel, f"tau_pose = {pose_tau:.4f}", (12, y),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.56, (0, 0, 0), 1, cv2.LINE_AA)
+        y += 28
+        cv2.putText(panel, f"passed = {pose_ok}", (12, y),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.56,
+                    (0, 150, 0) if pose_ok else (0, 0, 255), 2, cv2.LINE_AA)
+        y += 32
+        cv2.putText(panel, "Top keypoint displacements:", (12, y),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.54, (0, 0, 0), 1, cv2.LINE_AA)
+        y += 22
+
+        for idx, dist_norm, _, _ in records_sorted[:20]:
+            color = self._metric_color(dist_norm, pose_tau)
+            cv2.putText(panel, f"kpt {idx:02d}: {dist_norm:.4f}", (16, y),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.50, color, 1, cv2.LINE_AA)
+            y += 22
+            if y > h - 16:
+                break
+
+        # legend
+        cv2.putText(panel, "Legend:", (12, h - 70),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.52, (0, 0, 0), 1, cv2.LINE_AA)
+        cv2.putText(panel, "blue = original keypoint", (16, h - 50),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.46, (255, 0, 0), 1, cv2.LINE_AA)
+        cv2.putText(panel, "green/yellow/red = gen keypoint", (16, h - 30),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.46, (0, 0, 0), 1, cv2.LINE_AA)
+
+        canvas = np.hstack([vis, panel])
+        cv2.imwrite(save_path, canvas)
+        return save_path
+
+    def _save_direction_projection_vis(
+            self,
+            orig_image_path,
+            gen_image_path,
+            kpts_orig,
+            kpts_gen,
+            rules,
+            direction_checks,
+            scale,
+            save_path,
+            conf_thr=None,
+            perp_tau=None,
+    ):
+        """
+        可视化残肢方向检查。
+        左图：原图上的 residual segment（anchor -> residual endpoint）
+        右图：生成图上的参考方向、生成肢段、投影点、垂线
+        右侧面板：alpha / d_perp / angle(诊断用)
+        """
+        if conf_thr is None:
+            conf_thr = getattr(self, "conf_thr", 0.10)
+        if perp_tau is None:
+            perp_tau = getattr(self, "perp_tau", 0.060)
+
+        orig = cv2.imread(orig_image_path)
+        gen = cv2.imread(gen_image_path)
+        if orig is None or gen is None:
+            return None
+
+        if orig.shape[:2] != gen.shape[:2]:
+            gen = cv2.resize(gen, (orig.shape[1], orig.shape[0]), interpolation=cv2.INTER_AREA)
+
+        left = orig.copy()
+        right = gen.copy()
+
+        # 标题
+        cv2.putText(left, "Original residual segment", (12, 28),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.70, (255, 255, 255), 2, cv2.LINE_AA)
+        cv2.putText(right, "Generated segment / projection", (12, 28),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.70, (255, 255, 255), 2, cv2.LINE_AA)
+
+        # 根据 res_idx 快速查找检查结果
+        check_map = {c["res_idx"]: c for c in direction_checks}
+
+        summary_rows = []
+
+        for r in rules:
+            res_idx = r["res_idx"]
+            anchor_idx = r["anchor_idx"]
+            downstream_idx = r["downstream_idx"]
+
+            p_a = self._safe_get_point(kpts_orig, anchor_idx, conf_thr=conf_thr)
+            p_r = self._safe_get_point(kpts_orig, res_idx, conf_thr=conf_thr)
+
+            p_a_hat = self._safe_get_point(kpts_gen, anchor_idx, conf_thr=conf_thr)
+            p_d_hat = self._safe_get_point(kpts_gen, downstream_idx, conf_thr=conf_thr)
+
+            check = check_map.get(res_idx, None)
+
+            if p_a is None or p_r is None or p_a_hat is None or p_d_hat is None:
+                summary_rows.append({
+                    "res_idx": res_idx,
+                    "alpha": None,
+                    "d_perp": None,
+                    "angle_deg": None,
+                    "passed": False,
+                    "reason": "missing keypoints"
+                })
+                continue
+
+            # 左图：原始残肢向量
+            p_a_i = self._to_int_tuple(p_a)
+            p_r_i = self._to_int_tuple(p_r)
+            cv2.circle(left, p_a_i, 4, (255, 0, 0), -1)
+            cv2.circle(left, p_r_i, 4, (255, 0, 0), -1)
+            cv2.arrowedLine(left, p_a_i, p_r_i, (255, 0, 0), 2, tipLength=0.12)
+            cv2.putText(left, f"res {res_idx}", (p_r_i[0] + 4, p_r_i[1] - 4),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.45, (255, 0, 0), 1, cv2.LINE_AA)
+
+            # 右图：生成肢段及其投影
+            v_res = p_r - p_a
+            q_gen = p_d_hat - p_a_hat
+
+            norm_v = float(np.linalg.norm(v_res))
+            norm_q = float(np.linalg.norm(q_gen))
+            if norm_v < 1e-6 or norm_q < 1e-6:
+                summary_rows.append({
+                    "res_idx": res_idx,
+                    "alpha": None,
+                    "d_perp": None,
+                    "angle_deg": None,
+                    "passed": False,
+                    "reason": "degenerate vector"
+                })
+                continue
+
+            u = v_res / norm_v
+            proj_len = float(np.dot(q_gen, u))
+            proj_pt = p_a_hat + proj_len * u
+            ref_end = p_a_hat + max(norm_q, 40.0) * u
+
+            # 诊断角度（不参与 pass/fail）
+            cos_theta = float(np.dot(q_gen, v_res) / max(norm_q * norm_v, 1e-6))
+            cos_theta = float(np.clip(cos_theta, -1.0, 1.0))
+            angle_deg = float(np.degrees(np.arccos(cos_theta)))
+
+            p_a_hat_i = self._to_int_tuple(p_a_hat)
+            p_d_hat_i = self._to_int_tuple(p_d_hat)
+            proj_pt_i = self._to_int_tuple(proj_pt)
+            ref_end_i = self._to_int_tuple(ref_end)
+
+            # 蓝：参考 residual direction
+            cv2.circle(right, p_a_hat_i, 4, (255, 0, 0), -1)
+            cv2.arrowedLine(right, p_a_hat_i, ref_end_i, (255, 0, 0), 2, tipLength=0.12)
+
+            # 绿：生成肢段
+            cv2.circle(right, p_d_hat_i, 4, (0, 255, 0), -1)
+            cv2.arrowedLine(right, p_a_hat_i, p_d_hat_i, (0, 255, 0), 2, tipLength=0.12)
+
+            # 青：投影点
+            cv2.circle(right, proj_pt_i, 4, (255, 255, 0), -1)
+
+            # 红：垂线
+            cv2.line(right, proj_pt_i, p_d_hat_i, (0, 0, 255), 2)
+
+            # 文字
+            label = f"res {res_idx}"
+            cv2.putText(right, label, (p_d_hat_i[0] + 4, p_d_hat_i[1] - 4),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.45, (255, 255, 255), 1, cv2.LINE_AA)
+
+            alpha = check["alpha"] if check is not None else None
+            d_perp = check["d_perp"] if check is not None else None
+            passed = check["passed"] if check is not None else False
+
+            summary_rows.append({
+                "res_idx": res_idx,
+                "alpha": alpha,
+                "d_perp": d_perp,
+                "angle_deg": angle_deg,
+                "passed": passed,
+                "reason": "" if check is None else check["reason"],
+            })
+
+        h, w = left.shape[:2]
+        middle = np.hstack([left, right])
+
+        panel_w = 460
+        panel = np.ones((h, panel_w, 3), dtype=np.uint8) * 255
+
+        y = 28
+        cv2.putText(panel, "Direction / Projection Debug", (12, y),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.72, (0, 0, 0), 2, cv2.LINE_AA)
+        y += 32
+        cv2.putText(panel, f"tau_perp = {perp_tau:.4f}", (12, y),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.56, (0, 0, 0), 1, cv2.LINE_AA)
+        y += 28
+        cv2.putText(panel, "angle is diagnostic only", (12, y),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.50, (80, 80, 80), 1, cv2.LINE_AA)
+        y += 30
+
+        for row in summary_rows:
+            passed = row["passed"]
+            color = (0, 150, 0) if passed else (0, 0, 255)
+
+            cv2.putText(panel, f"res {row['res_idx']}: passed={passed}", (12, y),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.52, color, 1, cv2.LINE_AA)
+            y += 22
+
+            alpha_txt = "None" if row["alpha"] is None else f"{row['alpha']:.4f}"
+            dperp_txt = "None" if row["d_perp"] is None else f"{row['d_perp']:.4f}"
+            angle_txt = "None" if row["angle_deg"] is None else f"{row['angle_deg']:.2f}"
+
+            cv2.putText(panel, f"alpha  = {alpha_txt}", (26, y),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.48, (0, 0, 0), 1, cv2.LINE_AA)
+            y += 20
+            cv2.putText(panel, f"d_perp = {dperp_txt}", (26, y),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.48,
+                        self._metric_color(row["d_perp"] if row["d_perp"] is not None else 999, perp_tau),
+                        1, cv2.LINE_AA)
+            y += 20
+            cv2.putText(panel, f"angle  = {angle_txt} deg", (26, y),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.48, (0, 0, 0), 1, cv2.LINE_AA)
+            y += 28
+
+            if y > h - 40:
+                break
+
+        cv2.putText(panel, "Blue  = residual reference direction", (12, h - 78),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.46, (255, 0, 0), 1, cv2.LINE_AA)
+        cv2.putText(panel, "Green = generated limb segment", (12, h - 56),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.46, (0, 150, 0), 1, cv2.LINE_AA)
+        cv2.putText(panel, "Red   = perpendicular deviation", (12, h - 34),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.46, (0, 0, 255), 1, cv2.LINE_AA)
+        cv2.putText(panel, "Cyan  = projection point", (12, h - 12),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.46, (180, 180, 0), 1, cv2.LINE_AA)
+
+        canvas = np.hstack([middle, panel])
+        cv2.imwrite(save_path, canvas)
+        return save_path
+
     def _resize_generated_to_original(self, gen_image_path, orig_image_path):
         orig = cv2.imread(orig_image_path)
         gen = cv2.imread(gen_image_path)
@@ -125,7 +454,16 @@ class LimbCompositingAgent:
 
         return kpts[idx, :2].astype(np.float32)
 
-    def evaluate_pose_geometric(self, kpts_orig, kpts_gen, kpt_types_orig):
+    def evaluate_pose_geometric(
+            self,
+            kpts_orig,
+            kpts_gen,
+            kpt_types_orig,
+            orig_image_path=None,
+            gen_image_path=None,
+            vis_dir=None,
+            vis_prefix="pose_eval",
+    ):
         """
         Pose-based geometric critic.
 
@@ -139,19 +477,9 @@ class LimbCompositingAgent:
            along the original residual-limb direction. Instead of using angular error,
            we compute the perpendicular deviation from the original residual-limb ray.
 
-        Args:
-            kpts_orig: np.ndarray of shape (N, 3), original keypoints.
-            kpts_gen: np.ndarray of shape (N, 3), generated proxy keypoints.
-            kpt_types_orig: list or array, original keypoint types.
-
-        Returns:
-            dict containing:
-            - passed: bool
-            - reason: str
-            - E_pose: float
-            - pose_ok: bool
-            - direction_ok: bool
-            - direction_checks: list of per-limb checking results
+        If image paths + vis_dir are provided, two debug visualizations will be saved:
+        - pose displacement debug
+        - direction / projection debug
         """
         pose_tau = getattr(self, "pose_tau", 0.045)
         perp_tau = getattr(self, "perp_tau", 0.060)
@@ -169,7 +497,9 @@ class LimbCompositingAgent:
                 "E_pose": 0.0,
                 "pose_ok": True,
                 "direction_ok": True,
-                "direction_checks": []
+                "direction_checks": [],
+                "pose_vis_path": None,
+                "direction_vis_path": None,
             }
 
         scale = self._bbox_scale_from_keypoints(kpts_orig, conf_thr=conf_thr)
@@ -177,9 +507,6 @@ class LimbCompositingAgent:
         # ------------------------------------------------------------------
         # 1. Body-preservation error
         # ------------------------------------------------------------------
-        # These keypoints are expected to change or may not exist in the original image.
-        # We exclude residual endpoints and first generated downstream joints.
-        # Anchor joints are NOT excluded, because they should remain stable.
         target_indices = set()
         for r in rules:
             target_indices.add(r["res_idx"])
@@ -191,7 +518,7 @@ class LimbCompositingAgent:
         for i in range(num_kpts):
             if i in target_indices:
                 continue
-            if kpt_types_orig[i] == 2:
+            if i < len(kpt_types_orig) and kpt_types_orig[i] == 2:
                 continue
 
             p_orig = self._safe_get_point(kpts_orig, i, conf_thr=conf_thr)
@@ -257,12 +584,7 @@ class LimbCompositingAgent:
                 direction_checks.append(check)
                 continue
 
-            # Original residual-limb vector:
-            # original anchor joint -> original residual endpoint
             v_res = p_r - p_a
-
-            # Generated adjacent limb segment:
-            # generated anchor joint -> generated first downstream joint
             q_gen = p_d_hat - p_a_hat
 
             denom = float(np.dot(v_res, v_res))
@@ -272,10 +594,8 @@ class LimbCompositingAgent:
                 direction_checks.append(check)
                 continue
 
-            # Projection coefficient of q_gen on the original residual-limb direction.
             alpha = float(np.dot(q_gen, v_res) / denom)
 
-            # Perpendicular deviation from the original residual-limb ray.
             perp_vec = q_gen - alpha * v_res
             d_perp = float(np.linalg.norm(perp_vec) / scale)
 
@@ -299,6 +619,48 @@ class LimbCompositingAgent:
 
         passed = pose_ok and direction_ok
 
+        pose_vis_path = None
+        direction_vis_path = None
+
+        if orig_image_path is not None and gen_image_path is not None and vis_dir is not None:
+            try:
+                os.makedirs(vis_dir, exist_ok=True)
+
+                pose_vis_path = os.path.join(vis_dir, f"{vis_prefix}_pose_vis.png")
+                direction_vis_path = os.path.join(vis_dir, f"{vis_prefix}_direction_vis.png")
+
+                self._save_pose_displacement_vis(
+                    orig_image_path=orig_image_path,
+                    gen_image_path=gen_image_path,
+                    kpts_orig=kpts_orig,
+                    kpts_gen=kpts_gen,
+                    target_indices=target_indices,
+                    scale=scale,
+                    E_pose=E_pose,
+                    pose_ok=pose_ok,
+                    save_path=pose_vis_path,
+                    conf_thr=conf_thr,
+                    pose_tau=pose_tau,
+                )
+
+                self._save_direction_projection_vis(
+                    orig_image_path=orig_image_path,
+                    gen_image_path=gen_image_path,
+                    kpts_orig=kpts_orig,
+                    kpts_gen=kpts_gen,
+                    rules=rules,
+                    direction_checks=direction_checks,
+                    scale=scale,
+                    save_path=direction_vis_path,
+                    conf_thr=conf_thr,
+                    perp_tau=perp_tau,
+                )
+
+            except Exception as e:
+                print(f"⚠️ Visualization saving failed: {e}")
+                pose_vis_path = None
+                direction_vis_path = None
+
         return {
             "passed": passed,
             "reason": (
@@ -308,9 +670,10 @@ class LimbCompositingAgent:
             "E_pose": E_pose,
             "pose_ok": pose_ok,
             "direction_ok": direction_ok,
-            "direction_checks": direction_checks
+            "direction_checks": direction_checks,
+            "pose_vis_path": pose_vis_path,
+            "direction_vis_path": direction_vis_path,
         }
-
     def generate_prompt(self, image_path, kpts, kpt_types):
         """
         评估图片是否存在残肢。
@@ -514,11 +877,12 @@ class LimbCompositingAgent:
                 master_prompt,
                 str(attempt)
             )
-            gen_image_path = self._resize_generated_to_original(gen_image_path, image_path)
 
             if not gen_image_path:
                 print("❌ 图片生成失败，跳过本次重试。")
                 continue
+
+            gen_image_path = self._resize_generated_to_original(gen_image_path, image_path)
 
             # 1. Pose-based geometric critic
             try:
@@ -531,10 +895,19 @@ class LimbCompositingAgent:
                 kpts_orig=kpts_orig,
                 kpts_gen=kpts_gen,
                 kpt_types_orig=kpt_types_orig,
+                orig_image_path=image_path,
+                gen_image_path=gen_image_path,
+                vis_dir=save_dir,
+                vis_prefix=f"attempt_{attempt}"
             )
 
             print(f"📐 Pose critic: {'✅ 通过' if pose_eval['passed'] else '❌ 未通过'}")
             print(f"   {pose_eval['reason']}")
+
+            if pose_eval.get("pose_vis_path") is not None:
+                print(f"   pose vis: {pose_eval['pose_vis_path']}")
+            if pose_eval.get("direction_vis_path") is not None:
+                print(f"   direction vis: {pose_eval['direction_vis_path']}")
 
             if not pose_eval["passed"]:
                 print("⚠️ Pose critic failed, regenerate from original image.")
@@ -551,7 +924,6 @@ class LimbCompositingAgent:
                 return gen_image_path
 
             print("⚠️ VLM critic failed, regenerate from original image.")
-
         print("❌ No proxy image passed dual-critic validation.")
         return None
 
