@@ -9,7 +9,6 @@ import time
 import dashscope
 import numpy as np
 import torch
-from anyio import sleep
 from dashscope import MultiModalConversation
 from dashscope.aigc.image_generation import ImageGeneration
 from dashscope.api_entities.dashscope_response import Message
@@ -29,6 +28,28 @@ class LimbCompositingAgent:
         self.edit_model = edit_model
         self.pose_extractor = pose_extractor
         self.eval_model = eval_model
+
+    def _resize_generated_to_original(self, gen_image_path, orig_image_path):
+        orig = cv2.imread(orig_image_path)
+        gen = cv2.imread(gen_image_path)
+
+        if orig is None:
+            raise ValueError(f"Cannot read original image: {orig_image_path}")
+        if gen is None:
+            raise ValueError(f"Cannot read generated image: {gen_image_path}")
+
+        h, w = orig.shape[:2]
+        gh, gw = gen.shape[:2]
+
+        if (gh, gw) == (h, w):
+            return gen_image_path
+
+        gen_resized = cv2.resize(gen, (w, h), interpolation=cv2.INTER_AREA)
+        base, ext = os.path.splitext(gen_image_path)
+        resized_path = f"{base}_resized_to_orig{ext}"
+        cv2.imwrite(resized_path, gen_resized)
+
+        return resized_path
 
     def _get_residual_eval_rules(self, keypoint_types):
         """
@@ -451,7 +472,7 @@ class LimbCompositingAgent:
                     raise ValueError("JSON parse failed")
 
                 else:
-                    sleep(3)
+                    time.sleep(3)
                     raise RuntimeError(f"VLM API 调用失败: {response.code} - {response.message}")
 
             except Exception as e:
@@ -493,6 +514,7 @@ class LimbCompositingAgent:
                 master_prompt,
                 str(attempt)
             )
+            gen_image_path = self._resize_generated_to_original(gen_image_path, image_path)
 
             if not gen_image_path:
                 print("❌ 图片生成失败，跳过本次重试。")
@@ -579,7 +601,7 @@ class LimbCompositingAgent:
                                 return path
                     raise RuntimeError("❌ API 返回了 200，但未找到图片链接。")
                 else:
-                    sleep(5)
+                    time.sleep(3)
                     raise RuntimeError(f"❌ 图像生成失败: HTTP {response.status_code}, {response.message}")
 
             except Exception as e:
