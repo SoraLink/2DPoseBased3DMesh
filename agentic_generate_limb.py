@@ -29,46 +29,266 @@ class LimbCompositingAgent:
         self.edit_model = edit_model
         self.pose_extractor = pose_extractor
         self.eval_model = eval_model
-        self.generation_instruction = """
-        如果图中有假肢/义肢就替换图中的假肢/义肢为正常肢体，其他部位不要有任何改动。如果有残肢就沿着残肢生成合适的正常肢体确认双手双脚都有。
-        """
-        self.eval_instruction = """
-        [任务: 确认肢体健全]
-        观察图片是否是一个四肢健全的人，有完好的双手双脚。如果发现肢体缺失或者带有假肢都算图片不合格。可以接受某些肢体被身体遮挡看不见，但是不能有可见的残肢端点
-        
-        输出按照JSON格式:
-        {{
-            "passed": true/false,
-            "reason": 描述不合格原因比如有假肢或者某个肢体存在残肢。
-        }}
-        """
 
-    def _get_compositing_rules(self, keypoint_types):
+    def _get_residual_eval_rules(self, keypoint_types):
         """
-        找出原图的残肢点，并映射出在生成图中需要连线提取的正常关节点。
-        返回规则: anchor(锚点), orig_res(原图残肢端点), downstream(生成图里需要提取的下游关节)
+        Build residual-limb evaluation rules for the pose-based geometric critic.
+
+        Each rule defines:
+        - res_idx: residual endpoint in the original image
+        - anchor_idx: upstream anatomical joint
+        - downstream_idx: first downstream joint in the generated proxy image
+
+        This is used only for geometric validation, not for compositing.
         """
         mapping_dict = {
-            23: (5, 23, [7, 9, 17]),  # 左肩残 -> 提取生成图的: 左肩(5)->左肘(7)->左腕(9)
-            24: (6, 24, [8, 10, 18]),  # 右肩残 -> 提取生成图的: 右肩(6)->右肘(8)->右腕(10)
-            25: (7, 25, [9, 17]),  # 左肘残 -> 提取生成图的: 左肘(7)->左腕(9)
-            26: (8, 26, [10, 18]),  # 右肘残 -> 提取生成图的: 右肘(8)->右腕(10)
-            27: (11, 27, [13, 15, 19, 21]),  # 左胯残 -> 提取生成图的: 左胯(11)->左膝(13)->左踝(15)
-            28: (12, 28, [14, 16, 20, 22]),  # 右胯残 -> 提取生成图的: 右胯(12)->右膝(14)->右踝(16)
-            29: (13, 29, [15, 19, 21]),  # 左膝残 -> 提取生成图的: 左膝(13)->左踝(15)
-            30: (14, 30, [16, 20, 22])  # 右膝残 -> 提取生成图的: 右膝(14)->右踝(16)
+            # Upper limbs
+            23: (5, 7),  # left upper-arm residual: left shoulder -> left elbow
+            24: (6, 8),  # right upper-arm residual: right shoulder -> right elbow
+            25: (7, 9),  # left forearm residual: left elbow -> left wrist
+            26: (8, 10),  # right forearm residual: right elbow -> right wrist
+
+            # Lower limbs
+            27: (11, 13),  # left thigh residual: left hip -> left knee
+            28: (12, 14),  # right thigh residual: right hip -> right knee
+            29: (13, 15),  # left lower-leg residual: left knee -> left ankle
+            30: (14, 16),  # right lower-leg residual: right knee -> right ankle
         }
 
         rules = []
-        for res_idx, rule in mapping_dict.items():
-            if len(keypoint_types) > res_idx and keypoint_types[res_idx] in [0, 1]:
+        for res_idx, (anchor_idx, downstream_idx) in mapping_dict.items():
+            if res_idx < len(keypoint_types) and keypoint_types[res_idx] in [0, 1]:
                 rules.append({
                     "res_idx": res_idx,
-                    "orig_anchor": rule[0],
-                    "orig_res": rule[1],
-                    "downstream": rule[2]
+                    "anchor_idx": anchor_idx,
+                    "downstream_idx": downstream_idx,
                 })
+
         return rules
+
+    def _bbox_scale_from_keypoints(self, kpts, conf_thr=None):
+        """
+        Compute subject scale as sqrt(bounding-box area) from visible keypoints.
+        This matches the scale-normalization idea used in the paper.
+        """
+        if conf_thr is None:
+            conf_thr = getattr(self, "conf_thr", 0.10)
+
+        kpts = np.asarray(kpts)
+        visible = kpts[kpts[:, 2] > conf_thr]
+
+        if len(visible) < 2:
+            return 1.0
+
+        min_xy = np.min(visible[:, :2], axis=0)
+        max_xy = np.max(visible[:, :2], axis=0)
+
+        w, h = max_xy - min_xy
+        area = max(float(w * h), 1.0)
+
+        return float(np.sqrt(area))
+
+    def _safe_get_point(self, kpts, idx, conf_thr=None):
+        """
+        Safely fetch a visible 2D keypoint.
+        Return None if the keypoint is missing or low-confidence.
+        """
+        if conf_thr is None:
+            conf_thr = getattr(self, "conf_thr", 0.10)
+
+        if idx >= len(kpts):
+            return None
+
+        if kpts[idx][2] <= conf_thr:
+            return None
+
+        return kpts[idx, :2].astype(np.float32)
+
+    def evaluate_pose_geometric(self, kpts_orig, kpts_gen, kpt_types_orig):
+        """
+        Pose-based geometric critic.
+
+        It validates two properties:
+
+        1. Body preservation:
+           Non-target visible keypoints should not move too much after image editing.
+
+        2. Residual-limb direction/path consistency:
+           The generated limb segment adjacent to the residual region should extend
+           along the original residual-limb direction. Instead of using angular error,
+           we compute the perpendicular deviation from the original residual-limb ray.
+
+        Args:
+            kpts_orig: np.ndarray of shape (N, 3), original keypoints.
+            kpts_gen: np.ndarray of shape (N, 3), generated proxy keypoints.
+            kpt_types_orig: list or array, original keypoint types.
+
+        Returns:
+            dict containing:
+            - passed: bool
+            - reason: str
+            - E_pose: float
+            - pose_ok: bool
+            - direction_ok: bool
+            - direction_checks: list of per-limb checking results
+        """
+        pose_tau = getattr(self, "pose_tau", 0.045)
+        perp_tau = getattr(self, "perp_tau", 0.060)
+        conf_thr = getattr(self, "conf_thr", 0.10)
+
+        kpts_orig = np.asarray(kpts_orig, dtype=np.float32)
+        kpts_gen = np.asarray(kpts_gen, dtype=np.float32)
+
+        rules = self._get_residual_eval_rules(kpt_types_orig)
+
+        if not rules:
+            return {
+                "passed": True,
+                "reason": "No residual/prosthetic target found for pose evaluation.",
+                "E_pose": 0.0,
+                "pose_ok": True,
+                "direction_ok": True,
+                "direction_checks": []
+            }
+
+        scale = self._bbox_scale_from_keypoints(kpts_orig, conf_thr=conf_thr)
+
+        # ------------------------------------------------------------------
+        # 1. Body-preservation error
+        # ------------------------------------------------------------------
+        # These keypoints are expected to change or may not exist in the original image.
+        # We exclude residual endpoints and first generated downstream joints.
+        # Anchor joints are NOT excluded, because they should remain stable.
+        target_indices = set()
+        for r in rules:
+            target_indices.add(r["res_idx"])
+            target_indices.add(r["downstream_idx"])
+
+        keep_errors = []
+
+        num_kpts = min(len(kpts_orig), len(kpts_gen))
+        for i in range(num_kpts):
+            if i in target_indices:
+                continue
+            if kpt_types_orig[i] == 2:
+                continue
+
+            p_orig = self._safe_get_point(kpts_orig, i, conf_thr=conf_thr)
+            p_gen = self._safe_get_point(kpts_gen, i, conf_thr=conf_thr)
+
+            if p_orig is None or p_gen is None:
+                continue
+
+            dist = np.linalg.norm(p_gen - p_orig)
+            keep_errors.append(dist / scale)
+
+        E_pose = float(np.mean(keep_errors)) if keep_errors else 0.0
+        pose_ok = E_pose <= pose_tau
+
+        # ------------------------------------------------------------------
+        # 2. Residual-limb direction/path consistency
+        # ------------------------------------------------------------------
+        direction_checks = []
+        direction_ok = True
+
+        for r in rules:
+            res_idx = r["res_idx"]
+            anchor_idx = r["anchor_idx"]
+            downstream_idx = r["downstream_idx"]
+
+            p_a = self._safe_get_point(kpts_orig, anchor_idx, conf_thr=conf_thr)
+            p_r = self._safe_get_point(kpts_orig, res_idx, conf_thr=conf_thr)
+
+            p_a_hat = self._safe_get_point(kpts_gen, anchor_idx, conf_thr=conf_thr)
+            p_d_hat = self._safe_get_point(kpts_gen, downstream_idx, conf_thr=conf_thr)
+
+            check = {
+                "res_idx": res_idx,
+                "anchor_idx": anchor_idx,
+                "downstream_idx": downstream_idx,
+                "passed": False,
+                "alpha": None,
+                "d_perp": None,
+                "reason": ""
+            }
+
+            if p_a is None:
+                check["reason"] = f"Original anchor keypoint {anchor_idx} is missing."
+                direction_ok = False
+                direction_checks.append(check)
+                continue
+
+            if p_r is None:
+                check["reason"] = f"Original residual endpoint {res_idx} is missing."
+                direction_ok = False
+                direction_checks.append(check)
+                continue
+
+            if p_a_hat is None:
+                check["reason"] = f"Generated anchor keypoint {anchor_idx} is missing."
+                direction_ok = False
+                direction_checks.append(check)
+                continue
+
+            if p_d_hat is None:
+                check["reason"] = f"Generated downstream keypoint {downstream_idx} is missing."
+                direction_ok = False
+                direction_checks.append(check)
+                continue
+
+            # Original residual-limb vector:
+            # original anchor joint -> original residual endpoint
+            v_res = p_r - p_a
+
+            # Generated adjacent limb segment:
+            # generated anchor joint -> generated first downstream joint
+            q_gen = p_d_hat - p_a_hat
+
+            denom = float(np.dot(v_res, v_res))
+            if denom < 1e-6:
+                check["reason"] = "Original residual-limb vector is too short or degenerate."
+                direction_ok = False
+                direction_checks.append(check)
+                continue
+
+            # Projection coefficient of q_gen on the original residual-limb direction.
+            alpha = float(np.dot(q_gen, v_res) / denom)
+
+            # Perpendicular deviation from the original residual-limb ray.
+            perp_vec = q_gen - alpha * v_res
+            d_perp = float(np.linalg.norm(perp_vec) / scale)
+
+            check["alpha"] = alpha
+            check["d_perp"] = d_perp
+
+            if alpha > 0 and d_perp < perp_tau:
+                check["passed"] = True
+                check["reason"] = (
+                    f"Passed: alpha={alpha:.4f}, d_perp={d_perp:.4f}."
+                )
+            else:
+                check["passed"] = False
+                check["reason"] = (
+                    f"Failed: alpha={alpha:.4f}, d_perp={d_perp:.4f}, "
+                    f"required alpha > 0 and d_perp < {perp_tau:.4f}."
+                )
+                direction_ok = False
+
+            direction_checks.append(check)
+
+        passed = pose_ok and direction_ok
+
+        return {
+            "passed": passed,
+            "reason": (
+                f"E_pose={E_pose:.4f}, pose_ok={pose_ok}, "
+                f"direction_ok={direction_ok}"
+            ),
+            "E_pose": E_pose,
+            "pose_ok": pose_ok,
+            "direction_ok": direction_ok,
+            "direction_checks": direction_checks
+        }
 
     def generate_prompt(self, image_path, kpts, kpt_types):
         """
@@ -133,7 +353,9 @@ class LimbCompositingAgent:
                             f"将{defect_key}的假肢/义肢完全替换为具有完美解剖结构的真实正常肢体（包含末端的{end_part}）"
                         )
                         vlm_checks.append(
-                            f"- 【{defect_key}】：必须确认原有的假肢或义肢已被彻底移除，并替换为真实的血肉肢体，且包含完整的{end_part}。如果该部位依然能看到任何机械、碳纤维等假肢痕迹，则算作不合格。"
+                            f"- 【{defect_key}】：只评估该目标区域生成出的生物肢体是否视觉合理。"
+                            f"重点检查生成肢体的长度是否合理、解剖结构是否自然、材质/纹理是否与人体或衣物外观一致，"
+                            f"以及是否存在明显畸形、扭曲、断裂、不合理比例或不自然连接。"
                         )
                     else:
                         # 明确已知是缺失断肢
@@ -142,7 +364,9 @@ class LimbCompositingAgent:
                             f"【强烈注意】：绝对不要对{defect_key}现有的残肢部分进行任何像素改变、不要改变其原有的位置和方向"
                         )
                         vlm_checks.append(
-                            f"- 【{defect_key}】：必须确认残缺部分已经被自然延伸并补全，且末端包含完整的{end_part}。如果该部位依然呈现为断肢、或者延伸部分缺失了{end_part}，则算作不合格。"
+                            f"- 【{defect_key}】：只评估沿残肢补全出的生物肢体是否视觉合理。"
+                            f"重点检查生成肢体的长度是否合理、解剖结构是否自然、材质/纹理是否与人体或衣物外观一致，"
+                            f"以及是否存在明显畸形、扭曲、断裂、不合理比例或不自然连接。"
                         )
 
         if not defects_found:
@@ -162,13 +386,13 @@ class LimbCompositingAgent:
             # 将精准的验收标准组装给大模型
             vlm_checks_str = "\n".join(vlm_checks)
             eval_instruction = (
-                f"[任务: 确认特定缺陷部位是否完美修复]\n"
-                f"请严格按照以下标准，检查图片中的特定部位：\n"
+                f"[任务: 生成肢体视觉质量评估]\n"
+                f"请严格按照以下标准，只检查图片中指定目标肢体区域的视觉质量：\n"
                 f"{vlm_checks_str}\n\n"
                 f"输出必须严格按照JSON格式:\n"
                 f"{{\n"
                 f"    \"passed\": true/false,\n"
-                f"    \"reason\": \"详细描述你观察到的上述被检部位的当前状态，明确说明其是否满足了上述通过标准。\"\n"
+                f"    \"reason\": \"简要说明目标生成肢体在长度、结构、材质/纹理或比例上是否合理。\"\n"
                 f"}}"
             )
 
@@ -178,73 +402,6 @@ class LimbCompositingAgent:
                 "prompt": repair_prompt,
                 "eval_instruction": eval_instruction
             }
-
-    def generate_pure_extraction_mask(self, image_shape, kpts_gen, anchor_idx, downstream_indices, bbox):
-        """
-        极简版提取 Mask：不看任何 type，直接把锚点和所有下游点连成一条粗线。
-        """
-        height, width = image_shape[:2]
-        mask = np.zeros((height, width), dtype=np.uint8)
-
-        # 动态计算粗细
-        box_w, box_h = bbox[2], bbox[3]
-        limb_width = int(max(box_w, box_h) * 0.08)
-        limb_width = max(limb_width, 10)
-
-        # 把锚点和下游点串成一条路径 (例如：[右肩, 右肘, 右腕])
-        path_indices = [anchor_idx] + downstream_indices
-
-        # 收集这些点在生成图中的真实坐标
-        path_points = []
-        for idx in path_indices:
-            # 确保大模型确实生成了这个点 (置信度 > 0.1)
-            if kpts_gen[idx][2] > 0.1:
-                path_points.append((int(kpts_gen[idx][0]), int(kpts_gen[idx][1])))
-
-        # 顺着路径画线和圆圈
-        if len(path_points) >= 2:
-            for i in range(len(path_points) - 1):
-                p1, p2 = path_points[i], path_points[i + 1]
-                cv2.line(mask, p1, p2, color=255, thickness=limb_width)
-                cv2.circle(mask, p1, limb_width // 2, 255, -1)
-                cv2.circle(mask, p2, limb_width // 2, 255, -1)
-        else:
-            print("⚠️ 警告：大模型生成的肢体关键点丢失，无法画出完整的提取 Mask。")
-
-        return mask
-
-    def align_and_blend(self, orig_bgr, gen_bgr, mask_uint8, pt_orig_anchor, pt_orig_res, pt_gen_anchor, pt_gen_end):
-        """放弃泊松融合，改用清晰度更高的 Alpha 混合"""
-        # 1. 计算仿射变换矩阵 (保持不变)
-        vec_orig = pt_orig_res - pt_orig_anchor
-        vec_gen = pt_gen_end - pt_gen_anchor
-        angle_diff = np.degrees(np.arctan2(vec_orig[1], vec_orig[0]) - np.arctan2(vec_gen[1], vec_gen[0]))
-        tx, ty = pt_orig_anchor[0] - pt_gen_anchor[0], pt_orig_anchor[1] - pt_gen_anchor[1]
-
-        center_pt = (float(pt_gen_anchor[0]), float(pt_gen_anchor[1]))
-        M = cv2.getRotationMatrix2D(center_pt, angle_diff, 1.0)
-        M[0, 2] += tx
-        M[1, 2] += ty
-
-        # 2. 变换素材和遮罩
-        h, w = orig_bgr.shape[:2]
-        # 背景统一用白色填充
-        warped_gen = cv2.warpAffine(gen_bgr, M, (w, h), borderValue=(255, 255, 255))
-        warped_mask = cv2.warpAffine(mask_uint8, M, (w, h), borderValue=0)
-
-        # 3. 【关键】对 Mask 进行羽化，防止边缘锯齿
-        # 使用较小的高斯模糊 (如 5x5 或 7x7)，既能软化边缘，又不会像泊松那样弄花整条腿
-        feathered_mask = cv2.GaussianBlur(warped_mask, (7, 7), 0)
-        alpha = feathered_mask.astype(float) / 255.0
-        alpha = cv2.merge([alpha, alpha, alpha])  # 转为3通道
-
-        # 4. 直接合成 (Final = 素材 * alpha + 原图 * (1-alpha))
-        foreground = warped_gen.astype(float)
-        background = orig_bgr.astype(float)
-
-        final_img = (foreground * alpha + background * (1.0 - alpha)).astype(np.uint8)
-
-        return final_img
 
     def evaluate_image(self, image_path, prompt):
         print(f"👁️ [复查] 召唤视觉大模型 {self.eval_model} 担任裁判...")
@@ -307,138 +464,74 @@ class LimbCompositingAgent:
 
     def run(self, image_path, base_output_dir, original_annotation, max_attempts=3):
         print("\n" + "=" * 50)
-        print(f"🔪 启动骨架刻刀再植流水线 (Clean Logic)")
+        print("🚀 AgentHMR-Res proxy generation with dual-critic validation")
         print("=" * 50)
 
-        img_with_alpha = cv2.imread(image_path, cv2.IMREAD_UNCHANGED)
-
-        if img_with_alpha is not None and img_with_alpha.shape[2] == 4:
-            # 分离通道
-            b, g, r, a = cv2.split(img_with_alpha)
-            # 创建纯白背景 (与原图等大)
-            white_bg = np.ones_like(img_with_alpha[:, :, :3]) * 255
-            # 将 alpha 归一化到 0-1
-            alpha_factor = a.astype(float) / 255.0
-            alpha_factor = cv2.merge([alpha_factor, alpha_factor, alpha_factor])
-            # 前景 (人)
-            foreground = cv2.merge([b, g, r]).astype(float)
-            # 背景 (白)
-            background = white_bg.astype(float)
-            # 线性插值合成: Final = Foreground * Alpha + Background * (1 - Alpha)
-            orig_bgr = cv2.add(cv2.multiply(foreground, alpha_factor),
-                               cv2.multiply(background, 1.0 - alpha_factor)).astype(np.uint8)
-        else:
-            # 如果没有 Alpha 通道或者是普通图片，直接读取 BGR
-            orig_bgr = cv2.imread(image_path)
-        # ----------------------------------------------
         kpt_types_orig = original_annotation.get("keypoint_types", [])
         kpts_orig = np.array(original_annotation["keypoints"]).reshape(-1, 3)
 
         res = self.generate_prompt(image_path, kpts_orig, kpt_types_orig)
 
-        master_prompt = res['prompt']
-        print(f"📋 初诊发现缺陷，生成全局修改指令: {res['reason']}")
+        if res["passed"]:
+            print(f"✅ {res['reason']}")
+            return image_path
+
+        master_prompt = res["prompt"]
+        print(f"📋 初诊发现缺陷，生成局部修改指令: {res['reason']}")
         print(f"📝 Master Prompt: {master_prompt}")
 
-        # 获取切图规则
         base_name = os.path.splitext(os.path.basename(image_path))[0]
         save_dir = os.path.join(base_output_dir, base_name)
         os.makedirs(save_dir, exist_ok=True)
 
-        # for attempt in range(max_attempts):
-        #     print(f"\n🔄 尝试修复 ({attempt + 1}/{max_attempts})...")
-        #
-        #     # =========================================================
-        #     # 核心改动 2：无论第几次尝试，永远传入【原图】 + 【Master Prompt】
-        #     # =========================================================
-        #     gen_image_path = self.generate_full_image(image_path, save_dir, master_prompt, str(attempt))
-        #
-        #     if not gen_image_path:
-        #         print("❌ 图片生成失败，跳过本次重试。")
-        #         continue
-        #
-        #     # =========================================================
-        #     # 核心改动 3：对【生成的新图】进行姿态提取和“复查”
-        #     # =========================================================
-        #     # 注意：这里必须提取生成图的 kpts！不能用原图的！
-        #
-        #     gen_eval_res = self.evaluate_image(gen_image_path, res['eval_instruction'])
-        #
-        #     print(f"📊 复查评估: {'✅ 通过' if gen_eval_res['passed'] else '❌ 未通过'}")
-        #
-        #     if gen_eval_res['passed']:
-        #         print("🎉 肢体补全成功！")
-        #         # 走你后面的对齐、抠图缝合逻辑...
-        #         break
-        #     else:
-        #         print(f"⚠️ 生成图依然存在问题: {gen_eval_res['reason']}")
+        for attempt in range(max_attempts):
+            print(f"\n🔄 尝试生成 proxy image ({attempt + 1}/{max_attempts})...")
 
-        rules = self._get_compositing_rules(kpt_types_orig)
+            gen_image_path = self.generate_full_image(
+                image_path,
+                save_dir,
+                master_prompt,
+                str(attempt)
+            )
 
-        if not rules:
-            raise ValueError('No rules found!')
-        # gen_image_path='./workdir1/bing_義足のランナー_6068/compositing_material_raw_gen.jpg'
-        image_folder = Path(save_dir)
+            if not gen_image_path:
+                print("❌ 图片生成失败，跳过本次重试。")
+                continue
 
-        # --- 极简逻辑 ---
-        # 1. 拿到目录下所有文件，排除 final.png
-        # 只要是文件就全收进来，不管它是 .png, .jpg 还是其他
-        all_files = [str(p) for p in image_folder.iterdir() if p.is_file() and p.name != 'final.png']
+            # 1. Pose-based geometric critic
+            try:
+                kpts_gen = self.pose_extractor.extract_31_keypoints(gen_image_path)
+            except Exception as e:
+                print(f"❌ 生成图 pose extraction 失败: {e}")
+                continue
 
-        if not all_files:
-            raise FileNotFoundError(f"目录 {save_dir} 是空的，没找到素材。")
-
-        # 2. 字母序排序
-        all_files.sort()
-        # 3. 取最后一张
-        gen_image_path = all_files[-1]
-        target_h, target_w = orig_bgr.shape[:2]
-        img_gen_temp = cv2.imread(gen_image_path)
-        img_gen_resized = cv2.resize(img_gen_temp, (target_w, target_h), interpolation=cv2.INTER_AREA)
-        temp_gen_path = gen_image_path.replace(".png", "_resized.png")
-        cv2.imwrite(temp_gen_path, img_gen_resized)
-        gen_image_path = temp_gen_path
-        print(f"🎯 选定融合素材: {gen_image_path}")
-        # 提取生成图关键点和 bbox
-        kpts_gen = self.pose_extractor.extract_31_keypoints(gen_image_path)
-        gen_bgr = cv2.imread(gen_image_path)
-
-        valid_kpts = kpts_gen[kpts_gen[:, 2] > 0.1]
-        min_x, min_y = np.min(valid_kpts[:, :2], axis=0)
-        max_x, max_y = np.max(valid_kpts[:, :2], axis=0)
-        bbox_gen = [min_x, min_y, max_x - min_x, max_y - min_y]
-
-        current_canvas = orig_bgr.copy()
-
-        # 开始切割缝合
-        for rule in rules:
-            print(f"✂️ 直接沿正常关节提取肢体...")
-
-            # 极简提取法：直接传入生成的关键点、锚点和下游点列表
-            limb_mask = self.generate_pure_extraction_mask(
-                image_shape=gen_bgr.shape,
+            pose_eval = self.evaluate_pose_geometric(
+                kpts_orig=kpts_orig,
                 kpts_gen=kpts_gen,
-                anchor_idx=rule["orig_anchor"],
-                downstream_indices=rule["downstream"],
-                bbox=bbox_gen
+                kpt_types_orig=kpt_types_orig,
             )
 
-            # 获取物理坐标进行对齐
-            pt_orig_anchor = kpts_orig[rule['orig_anchor'], :2]
-            pt_orig_res = kpts_orig[rule['orig_res'], :2]
+            print(f"📐 Pose critic: {'✅ 通过' if pose_eval['passed'] else '❌ 未通过'}")
+            print(f"   {pose_eval['reason']}")
 
-            pt_gen_anchor = kpts_gen[rule['orig_anchor'], :2]
-            # 计算方向所用的终点，取最末端的关节
-            pt_gen_end = kpts_gen[rule['downstream'][0], :2]
+            if not pose_eval["passed"]:
+                print("⚠️ Pose critic failed, regenerate from original image.")
+                continue
 
-            # 缝合
-            current_canvas = self.align_and_blend(
-                current_canvas, gen_bgr, limb_mask,
-                pt_orig_anchor, pt_orig_res, pt_gen_anchor, pt_gen_end
-            )
-        final_path = os.path.join(save_dir, 'final.png')
-        cv2.imwrite(final_path, current_canvas)
-        return final_path
+            # 2. VLM-based visual-quality critic
+            gen_eval_res = self.evaluate_image(gen_image_path, res["eval_instruction"])
+
+            print(f"👁️ VLM critic: {'✅ 通过' if gen_eval_res['passed'] else '❌ 未通过'}")
+            print(f"   {gen_eval_res.get('reason', '')}")
+
+            if gen_eval_res["passed"]:
+                print("🎉 Proxy image passed dual-critic validation!")
+                return gen_image_path
+
+            print("⚠️ VLM critic failed, regenerate from original image.")
+
+        print("❌ No proxy image passed dual-critic validation.")
+        return None
 
     def generate_full_image(self, image_path, save_dir, prompt, iter):
         """
