@@ -1017,7 +1017,8 @@ class LimbCompositingAgent:
 
 if __name__ == "__main__":
     image_dir = Path('./data/eval_seg_padded')
-    save_dir = Path('./workdir1')
+    # image_dir = Path('./eval')
+    save_dir = Path('./workdir3')
 
     pose_extractor = PoseExtractor(
         config_file='./models/pose/vit_config.py',
