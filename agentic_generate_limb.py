@@ -54,6 +54,7 @@ class LimbCompositingAgent:
             save_path,
             conf_thr=None,
             pose_tau=None,
+            kpt_types_orig=None,
     ):
         """
         可视化非目标关键点的位移。
@@ -80,6 +81,10 @@ class LimbCompositingAgent:
         num_kpts = min(len(kpts_orig), len(kpts_gen))
         for i in range(num_kpts):
             if i in target_indices:
+                continue
+
+            # Keep visualization consistent with E_pose computation.
+            if kpt_types_orig is not None and i < len(kpt_types_orig) and kpt_types_orig[i] in [1, 2]:
                 continue
 
             p_orig = self._safe_get_point(kpts_orig, i, conf_thr=conf_thr)
@@ -384,35 +389,40 @@ class LimbCompositingAgent:
         """
         Build residual-limb evaluation rules for the pose-based geometric critic.
 
-        Each rule defines:
-        - res_idx: residual endpoint in the original image
-        - anchor_idx: upstream anatomical joint
-        - downstream_idx: first downstream joint in the generated proxy image
-
-        This is used only for geometric validation, not for compositing.
+        keypoint_types[res_idx] == 0 means this residual endpoint exists.
+        keypoint_types[res_idx] == 2 means absent.
         """
         mapping_dict = {
+            # res_idx: (anchor_idx, first_downstream_idx, exclude_indices)
+
             # Upper limbs
-            23: (5, 7),  # left upper-arm residual: left shoulder -> left elbow
-            24: (6, 8),  # right upper-arm residual: right shoulder -> right elbow
-            25: (7, 9),  # left forearm residual: left elbow -> left wrist
-            26: (8, 10),  # right forearm residual: right elbow -> right wrist
+            23: (5, 7, [7, 9, 17]),  # left upper-arm residual
+            24: (6, 8, [8, 10, 18]),  # right upper-arm residual
+            25: (7, 9, [9, 17]),  # left forearm residual
+            26: (8, 10, [10, 18]),  # right forearm residual
 
             # Lower limbs
-            27: (11, 13),  # left thigh residual: left hip -> left knee
-            28: (12, 14),  # right thigh residual: right hip -> right knee
-            29: (13, 15),  # left lower-leg residual: left knee -> left ankle
-            30: (14, 16),  # right lower-leg residual: right knee -> right ankle
+            27: (11, 13, [13, 15, 19, 21]),  # left thigh residual
+            28: (12, 14, [14, 16, 20, 22]),  # right thigh residual
+            29: (13, 15, [15, 19, 21]),  # left lower-leg residual
+            30: (14, 16, [16, 20, 22]),  # right lower-leg residual
         }
 
         rules = []
-        for res_idx, (anchor_idx, downstream_idx) in mapping_dict.items():
-            if res_idx < len(keypoint_types) and keypoint_types[res_idx] in [0, 1]:
-                rules.append({
-                    "res_idx": res_idx,
-                    "anchor_idx": anchor_idx,
-                    "downstream_idx": downstream_idx,
-                })
+        for res_idx, (anchor_idx, downstream_idx, exclude_indices) in mapping_dict.items():
+            if res_idx >= len(keypoint_types):
+                continue
+
+            # Only existing residual endpoints should be evaluated.
+            if keypoint_types[res_idx] != 0:
+                continue
+
+            rules.append({
+                "res_idx": res_idx,
+                "anchor_idx": anchor_idx,
+                "downstream_idx": downstream_idx,  # 用于 direction check
+                "exclude_indices": exclude_indices,  # 用于 E_pose 和可视化排除
+            })
 
         return rules
 
@@ -507,8 +517,9 @@ class LimbCompositingAgent:
         # ------------------------------------------------------------------
         # 1. Body-preservation error
         # ------------------------------------------------------------------
-        target_indices = set()
+        target_indices = set(range(23, 31))
         for r in rules:
+            target_indices.update(r.get("exclude_indices", []))
             target_indices.add(r["res_idx"])
             target_indices.add(r["downstream_idx"])
 
@@ -518,7 +529,10 @@ class LimbCompositingAgent:
         for i in range(num_kpts):
             if i in target_indices:
                 continue
-            if i < len(kpt_types_orig) and kpt_types_orig[i] == 2:
+
+            # type=1: prosthetic point, type=2: absent point
+            # Both should not be used for body-preservation error.
+            if i < len(kpt_types_orig) and kpt_types_orig[i] in [1, 2]:
                 continue
 
             p_orig = self._safe_get_point(kpts_orig, i, conf_thr=conf_thr)
@@ -641,6 +655,7 @@ class LimbCompositingAgent:
                     save_path=pose_vis_path,
                     conf_thr=conf_thr,
                     pose_tau=pose_tau,
+                    kpt_types_orig=kpt_types_orig,
                 )
 
                 self._save_direction_projection_vis(
