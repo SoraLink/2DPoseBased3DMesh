@@ -1309,8 +1309,8 @@ class LimbCompositingAgent:
 
 
 if __name__ == "__main__":
-    image_dir = Path('./data/eval_seg_padded')
-    # image_dir = Path('./eval')
+    # image_dir = Path('./data/eval_seg_padded')
+    image_dir = Path('./eval')
     save_dir = Path('./workdir3')
 
     # pose_extractor = PoseExtractor(
@@ -1320,7 +1320,7 @@ if __name__ == "__main__":
     # )
 
     pose_extractor = PoseExtractor(
-        config_file = "./models/pose/td-hm_ViTPose-huge_8xb64-210e_coco-256x192.py",
+        config_file = "/home/sora/workspace/mmpose-custom/configs/body_2d_keypoint/topdown_heatmap/coco/td-hm_ViTPose-huge_8xb64-210e_coco-256x192.py",
         checkpoint_file='./models/pose/td-hm_ViTPose-huge_8xb64-210e_coco-256x192-e32adcd4_20230314.pth',
         device='cuda:0'
     )
