@@ -1158,6 +1158,43 @@ class LimbCompositingAgent:
         # 兜底：如果 API 彻底挂了，默认让它重画
         return {"passed": False, "reason": "VLM 裁判多次调用失败，默认复查不通过。"}
 
+    def _get_pose_bbox_from_annotation(self, annotation, image_path, pad_ratio=0.15):
+        """
+        Return bbox in xyxy format for MMPose top-down inference.
+        Prefer COCO annotation bbox if available. Otherwise compute bbox from visible keypoints.
+
+        COCO bbox: [x, y, w, h]
+        MMPose top-down bbox: [[x1, y1, x2, y2]]
+        """
+        img = cv2.imread(image_path)
+        if img is None:
+            raise ValueError(f"Cannot read image: {image_path}")
+
+        h, w = img.shape[:2]
+
+        kpts = np.array(annotation["keypoints"], dtype=np.float32).reshape(-1, 3)
+        visible = kpts[kpts[:, 2] > 0]
+
+        if len(visible) < 2:
+            return np.array([[0, 0, w, h]], dtype=np.float32)
+
+        x1, y1 = np.min(visible[:, :2], axis=0)
+        x2, y2 = np.max(visible[:, :2], axis=0)
+
+        bw = x2 - x1
+        bh = y2 - y1
+
+        # expand bbox a bit
+        pad_x = bw * pad_ratio
+        pad_y = bh * pad_ratio
+
+        x1 = max(0, x1 - pad_x)
+        y1 = max(0, y1 - pad_y)
+        x2 = min(w - 1, x2 + pad_x)
+        y2 = min(h - 1, y2 + pad_y)
+
+        return np.array([[x1, y1, x2, y2]], dtype=np.float32)
+
     def run(self, image_path, base_output_dir, original_annotation, max_attempts=3):
         print("\n" + "=" * 50)
         print("🚀 AgentHMR-Res proxy generation with dual-critic validation")
@@ -1198,7 +1235,8 @@ class LimbCompositingAgent:
 
             # 1. Pose-based geometric critic
             try:
-                kpts_gen = self.pose_extractor.extract_17_keypoints(gen_image_path)
+                bbox = self._get_pose_bbox_from_annotation(original_annotation, image_path)
+                kpts_gen = self.pose_extractor.extract_17_keypoints(gen_image_path, bbox)
             except Exception as e:
                 print(f"❌ 生成图 pose extraction 失败: {e}")
                 continue
