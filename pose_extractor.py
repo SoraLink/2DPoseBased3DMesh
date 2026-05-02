@@ -24,6 +24,48 @@ class PoseExtractor:
         # 判定点是否可见的全局阈值
         self.score_threshold = 0.3
 
+    def extract_17_keypoints(self, image_path: str, bbox=None) -> np.ndarray:
+        """
+        Use a standard COCO-17 pose model, such as ViTPose, to predict 17 keypoints.
+
+        Returns:
+            kpts_17: np.ndarray, shape (17, 3), where the third column is confidence.
+        """
+        img = cv2.imread(image_path, cv2.IMREAD_COLOR)
+
+        if img is None:
+            raise ValueError(f"❌ 图像解码失败: {image_path}")
+
+        h, w = img.shape[:2]
+
+        # MMPose top-down bbox should be xyxy: [x1, y1, x2, y2].
+        # If bbox is not provided, use the full image as the person bbox.
+        if bbox is None:
+            bbox = np.array([[0, 0, w, h]], dtype=np.float32)
+        else:
+            bbox = np.asarray(bbox, dtype=np.float32)
+            if bbox.ndim == 1:
+                bbox = bbox[None, :]
+
+        with torch.no_grad():
+            batch_results = inference_topdown(self.model, img, bboxes=bbox)
+
+        if len(batch_results) == 0:
+            return np.zeros((17, 3), dtype=np.float32)
+
+        pred_instances = batch_results[0].pred_instances
+
+        keypoints = pred_instances.keypoints[0]  # (17, 2)
+
+        # ViTPose / MMPose usually provides keypoint_scores.
+        scores = np.ones((keypoints.shape[0],), dtype=np.float32)
+
+        kpts_17 = np.zeros((17, 3), dtype=np.float32)
+        kpts_17[:, :2] = keypoints[:17]
+        kpts_17[:, 2] = scores[:17]
+
+        return kpts_17
+
     def extract_31_keypoints(self, image_path: str) -> np.ndarray:
         """
         执行推理并返回清洗后的 31 个关键点矩阵，以及一个包含所有残肢信息的列表。
