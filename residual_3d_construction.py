@@ -717,6 +717,52 @@ def _apply_similarity_transform(points, transform):
     points = np.asarray(points, dtype=np.float64)
     return scale * (R @ points.T).T + t
 
+def rotation_matrix_to_angle_axis(R):
+    """
+    Return rotation angle in degrees and axis.
+    """
+    R = np.asarray(R, dtype=np.float64)
+
+    cos_theta = (np.trace(R) - 1.0) / 2.0
+    cos_theta = np.clip(cos_theta, -1.0, 1.0)
+
+    angle = np.arccos(cos_theta)
+
+    if abs(angle) < 1e-8:
+        axis = np.array([0.0, 0.0, 0.0])
+    else:
+        axis = np.array([
+            R[2, 1] - R[1, 2],
+            R[0, 2] - R[2, 0],
+            R[1, 0] - R[0, 1],
+        ]) / (2.0 * np.sin(angle))
+
+    return float(np.degrees(angle)), axis
+
+
+def debug_print_pa_transform(transform, sample_name=""):
+    """
+    Print PA similarity transform:
+        aligned = scale * (R @ pred.T).T + t
+    """
+    if transform is None:
+        print(f"[PA DEBUG] {sample_name}: transform is None")
+        return
+
+    scale, R, t = transform
+    angle_deg, axis = rotation_matrix_to_angle_axis(R)
+
+    print("\n================ PA Transform Debug ================")
+    print(f"Sample: {sample_name}")
+    print(f"Scale: {scale:.6f}")
+    print(f"Rotation angle: {angle_deg:.2f} degrees")
+    print(f"Rotation axis: {axis}")
+    print(f"det(R): {np.linalg.det(R):.6f}")
+    print("R =")
+    print(np.array2string(R, precision=4, suppress_small=True))
+    print("t =")
+    print(np.array2string(t, precision=4, suppress_small=True))
+    print("====================================================\n")
 
 def calculate_aa_3d_metrics(
     pred_joints_3d,
@@ -836,6 +882,8 @@ def calculate_aa_3d_metrics(
         transform = _similarity_transform_from_points(body_pred, body_gt)
 
         if transform is not None:
+            debug_print_pa_transform(transform)
+
             eval_pred_aligned = _apply_similarity_transform(eval_pred, transform)
             aa_pa_mpjpe = float(np.mean(np.linalg.norm(eval_pred_aligned - eval_gt, axis=1)) * unit_scale)
 
