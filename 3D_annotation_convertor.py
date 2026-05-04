@@ -246,7 +246,7 @@ def infer_keypoint_types(
     If an averaged residual point exists, downstream keypoints are marked as prosthetic.
     The residual endpoint itself remains normal.
     """
-    keypoint_types = ["normal"] * len(output_names)
+    keypoint_types = [0] * len(output_names)
     name_to_idx = {name: i for i, name in enumerate(output_names)}
 
     for res_name in DISTAL_KEYPOINTS.keys():
@@ -255,7 +255,7 @@ def infer_keypoint_types(
 
         for kp_name in DISTAL_KEYPOINTS[res_name]:
             if kp_name in name_to_idx:
-                keypoint_types[name_to_idx[kp_name]] = "prosthetic"
+                keypoint_types[name_to_idx[kp_name]] = 1
 
     return keypoint_types
 
@@ -388,7 +388,10 @@ def convert_dataset(
                 "num_keypoints": len(output_keypoint_names),
             }
         ],
-        "keypoint_type_categories": ["normal", "prosthetic"],
+        "keypoint_type_categories": {
+            "normal": 0,
+            "prosthetic": 1,
+        },
     }
 
     camera_dirs = sorted([p for p in root_dir.glob("Camera_View_*") if p.is_dir()])
@@ -493,7 +496,7 @@ if __name__ == "__main__":
     parser.add_argument(
         "--root",
         type=str,
-        default="./demo16",
+        default="./3D_data/demo16",
         help="Root directory containing Camera_View_xx folders",
     )
     parser.add_argument(
