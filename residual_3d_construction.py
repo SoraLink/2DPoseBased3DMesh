@@ -6,7 +6,7 @@ import matplotlib.pyplot as plt
 
 from main_pipeline import calculate_miou
 from pose_extractor import read_kpts_annotation
-from sam_3d_body_recon import ReconstructionEngine
+from HSMR import ReconstructionEngine
 
 import os
 import cv2
@@ -1400,7 +1400,7 @@ def main(ori_image_path, gen_image_path, reconstructor, annotation_file, gt_3d_k
 
 if __name__ == "__main__":
     reconstructor = ReconstructionEngine()
-    workdir = Path('./workdir4')
+    workdir = Path('./workdir9')
     gt_3d_data = load_3d_gt_json("./3D_data/global_3d_keypoints.json")
 
     # 提前转为 list
