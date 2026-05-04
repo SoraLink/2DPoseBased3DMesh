@@ -17,7 +17,7 @@ def init_model(device):
 
 
 def process_image(processor, image_path: Path, out_dir: Path, device: str):
-    image = Image.open(image_path)
+    image = Image.open(image_path).convert("RGB")
 
     with torch.inference_mode(), torch.autocast(device_type="cuda" if "cuda" in device else "cpu"):
         inference_state = processor.set_image(image)
@@ -83,6 +83,7 @@ def process_image(processor, image_path: Path, out_dir: Path, device: str):
     image_array = np.array(image_rgba)
 
     # 将 mask 之外的区域 alpha 设为 0（透明）
+    image_array[~final_mask, :3] = [255, 255, 255]
     image_array[~final_mask, 3] = 0
     result_image = Image.fromarray(image_array)
 
@@ -93,8 +94,8 @@ def process_image(processor, image_path: Path, out_dir: Path, device: str):
 
 
 if __name__ == "__main__":
-    image_dir = Path("./data/eval")
-    output_dir = Path("./data/eval_seg")
+    image_dir = Path("./3D_data/images")
+    output_dir = Path("./3D_data/images_seg")
     output_dir.mkdir(parents=True, exist_ok=True)  # 确保输出目录存在
 
     device = "cuda" if torch.cuda.is_available() else "cpu"
@@ -112,4 +113,4 @@ if __name__ == "__main__":
         try:
             process_image(processor, image_path, output_dir, device)
         except Exception as e:
-            print(f"处理 {image_path.name} 时出错: {e}")
+            raise e
