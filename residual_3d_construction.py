@@ -2,6 +2,7 @@ import json
 import os
 import re
 from pathlib import Path
+import matplotlib.pyplot as plt
 
 from main_pipeline import calculate_miou
 from pose_extractor import read_kpts_annotation
@@ -122,6 +123,232 @@ METAINFO = {
         0.072, 0.072, 0.062, 0.062, 0.087, 0.087, 0.089, 0.089
     ],
 }
+
+def _collect_aa_eval_sets(pred_joints_3d, gt_3d_kpts, kpt_types_orig=None):
+    """
+    收集用于 AA-MPJPE / AA-PA-MPJPE 的点集
+    返回:
+        names, eval_pred, eval_gt, body_pred, body_gt
+    """
+    gt_joints_3d = normalize_gt_3d_keypoints(gt_3d_kpts)
+    if gt_joints_3d is None:
+        return None, None, None, None, None
+
+    names = []
+    eval_pred = []
+    eval_gt = []
+
+    body_pred = []
+    body_gt = []
+
+    # 标准 body joints: 0-16
+    for idx in range(0, 17):
+        name = METAINFO["keypoint_info"][idx]["name"]
+
+        if kpt_types_orig is not None and idx < len(kpt_types_orig):
+            if kpt_types_orig[idx] != 0:
+                continue
+
+        if name not in pred_joints_3d or name not in gt_joints_3d:
+            continue
+
+        p_pred = _to_vec3(pred_joints_3d[name])
+        p_gt = _to_vec3(gt_joints_3d[name])
+
+        if p_pred is None or p_gt is None:
+            continue
+
+        names.append(name)
+        eval_pred.append(p_pred)
+        eval_gt.append(p_gt)
+
+        body_pred.append(p_pred)
+        body_gt.append(p_gt)
+
+    # residual endpoints: 23-30
+    for idx in range(23, 31):
+        name = METAINFO["keypoint_info"][idx]["name"]
+
+        if kpt_types_orig is not None and idx < len(kpt_types_orig):
+            if kpt_types_orig[idx] != 0:
+                continue
+
+        if name not in pred_joints_3d or name not in gt_joints_3d:
+            continue
+
+        p_pred = _to_vec3(pred_joints_3d[name])
+        p_gt = _to_vec3(gt_joints_3d[name])
+
+        if p_pred is None or p_gt is None:
+            continue
+
+        names.append(name)
+        eval_pred.append(p_pred)
+        eval_gt.append(p_gt)
+
+    if len(eval_pred) == 0:
+        return None, None, None, None, None
+
+    return (
+        names,
+        np.asarray(eval_pred, dtype=np.float64),
+        np.asarray(eval_gt, dtype=np.float64),
+        np.asarray(body_pred, dtype=np.float64) if len(body_pred) > 0 else None,
+        np.asarray(body_gt, dtype=np.float64) if len(body_gt) > 0 else None,
+    )
+
+
+def _dict_from_names_and_points(names, points):
+    return {name: points[i] for i, name in enumerate(names)}
+
+
+def _set_axes_equal(ax):
+    x_limits = ax.get_xlim3d()
+    y_limits = ax.get_ylim3d()
+    z_limits = ax.get_zlim3d()
+
+    x_range = abs(x_limits[1] - x_limits[0])
+    y_range = abs(y_limits[1] - y_limits[0])
+    z_range = abs(z_limits[1] - z_limits[0])
+
+    x_middle = np.mean(x_limits)
+    y_middle = np.mean(y_limits)
+    z_middle = np.mean(z_limits)
+
+    plot_radius = 0.5 * max([x_range, y_range, z_range])
+
+    ax.set_xlim3d([x_middle - plot_radius, x_middle + plot_radius])
+    ax.set_ylim3d([y_middle - plot_radius, y_middle + plot_radius])
+    ax.set_zlim3d([z_middle - plot_radius, z_middle + plot_radius])
+
+
+def _draw_skeleton(ax, joints_dict, color, label_prefix=""):
+    """
+    joints_dict: {name: np.array([x,y,z])}
+    """
+    # 画点
+    xs, ys, zs = [], [], []
+    for name, p in joints_dict.items():
+        xs.append(p[0])
+        ys.append(p[1])
+        zs.append(p[2])
+
+    ax.scatter(xs, ys, zs, c=color, s=28)
+
+    # 画骨架连线
+    for _, info in METAINFO["skeleton_info"].items():
+        a, b = info["link"]
+        if a in joints_dict and b in joints_dict:
+            pa = joints_dict[a]
+            pb = joints_dict[b]
+            ax.plot(
+                [pa[0], pb[0]],
+                [pa[1], pb[1]],
+                [pa[2], pb[2]],
+                c=color,
+                linewidth=2
+            )
+
+
+def _draw_named_points(ax, joints_dict, color):
+    for name, p in joints_dict.items():
+        if "Res" in name:
+            ax.text(p[0], p[1], p[2], name, color=color, fontsize=8)
+
+
+def visualize_aa_alignment(pred_joints_3d, gt_3d_kpts, kpt_types_orig, save_prefix):
+    """
+    生成两张图:
+      1) root-aligned pred vs gt
+      2) PA-aligned pred vs gt
+    """
+    if gt_3d_kpts is None:
+        print("No 3D GT, skip visualization.")
+        return
+
+    names, eval_pred, eval_gt, body_pred, body_gt = _collect_aa_eval_sets(
+        pred_joints_3d, gt_3d_kpts, kpt_types_orig
+    )
+
+    if names is None:
+        print("No valid 3D joints to visualize.")
+        return
+
+    gt_joints_3d = normalize_gt_3d_keypoints(gt_3d_kpts)
+    pred_root = _get_pelvis_root(pred_joints_3d)
+    gt_root = _get_pelvis_root(gt_joints_3d)
+
+    if pred_root is None or gt_root is None:
+        print("No valid pelvis root, skip visualization.")
+        return
+
+    # -----------------------------
+    # 1) Root-aligned visualization
+    # -----------------------------
+    eval_pred_rooted = eval_pred - pred_root
+    eval_gt_rooted = eval_gt - gt_root
+
+    pred_rooted_dict = _dict_from_names_and_points(names, eval_pred_rooted)
+    gt_rooted_dict = _dict_from_names_and_points(names, eval_gt_rooted)
+
+    fig = plt.figure(figsize=(8, 8))
+    ax = fig.add_subplot(111, projection='3d')
+
+    _draw_skeleton(ax, gt_rooted_dict, color='green')
+    _draw_skeleton(ax, pred_rooted_dict, color='red')
+    _draw_named_points(ax, gt_rooted_dict, color='green')
+    _draw_named_points(ax, pred_rooted_dict, color='red')
+
+    ax.set_title("Root-aligned: GT (green) vs Pred (red)")
+    ax.set_xlabel("X")
+    ax.set_ylabel("Y")
+    ax.set_zlabel("Z")
+    ax.view_init(elev=20, azim=-60)
+    _set_axes_equal(ax)
+
+    root_vis_path = f"{save_prefix}_root_aligned.png"
+    plt.tight_layout()
+    plt.savefig(root_vis_path, dpi=200)
+    plt.close(fig)
+
+    # -----------------------------
+    # 2) PA-aligned visualization
+    # -----------------------------
+    if body_pred is not None and len(body_pred) >= 3:
+        transform = _similarity_transform_from_points(body_pred, body_gt)
+
+        if transform is not None:
+            eval_pred_pa = _apply_similarity_transform(eval_pred, transform)
+
+            pred_pa_dict = _dict_from_names_and_points(names, eval_pred_pa)
+            gt_dict = _dict_from_names_and_points(names, eval_gt)
+
+            fig = plt.figure(figsize=(8, 8))
+            ax = fig.add_subplot(111, projection='3d')
+
+            _draw_skeleton(ax, gt_dict, color='green')
+            _draw_skeleton(ax, pred_pa_dict, color='red')
+            _draw_named_points(ax, gt_dict, color='green')
+            _draw_named_points(ax, pred_pa_dict, color='red')
+
+            ax.set_title("PA-aligned: GT (green) vs Pred (red)")
+            ax.set_xlabel("X")
+            ax.set_ylabel("Y")
+            ax.set_zlabel("Z")
+            ax.view_init(elev=20, azim=-60)
+            _set_axes_equal(ax)
+
+            pa_vis_path = f"{save_prefix}_pa_aligned.png"
+            plt.tight_layout()
+            plt.savefig(pa_vis_path, dpi=200)
+            plt.close(fig)
+
+            print(f"✅ Saved visualization: {root_vis_path}")
+            print(f"✅ Saved visualization: {pa_vis_path}")
+        else:
+            print("PA transform failed, only saved root-aligned visualization.")
+    else:
+        print("Not enough body joints for PA visualization.")
 
 def visualize_raw_keypoints(img_path, raw_joints_2d, raw_joints_3d, global_cam, out_path, search_range=35):
     """
@@ -1098,6 +1325,14 @@ def main(ori_image_path, gen_image_path, reconstructor, annotation_file, gt_3d_k
             kpt_types_orig=types_orig,
             unit_scale=1000.0,  # meter -> mm
         )
+        if gt_3d_kpts is not None:
+            vis_prefix = os.path.join(dir_name, "aa_metric_vis")
+            visualize_aa_alignment(
+                pred_joints_3d=pred_joints_3d,
+                gt_3d_kpts=gt_3d_kpts,
+                kpt_types_orig=types_orig,
+                save_prefix=vis_prefix
+            )
 
         if aa_mpjpe is not None:
             print(f"📊 [3D评估] AA-MPJPE: {aa_mpjpe:.2f} mm")
