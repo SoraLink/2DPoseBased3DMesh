@@ -1353,7 +1353,7 @@ def main(ori_image_path, gen_image_path, reconstructor, annotation_file, gt_3d_k
 if __name__ == "__main__":
     reconstructor = ReconstructionEngine()
     workdir = Path('./workdir4')
-    gt_3d_data = load_3d_gt_json("./global_3d_keypoints.json")
+    gt_3d_data = load_3d_gt_json("./3D_data/global_3d_keypoints.json")
 
     # 提前转为 list
     dirs = list(workdir.glob('*'))
@@ -1370,14 +1370,14 @@ if __name__ == "__main__":
     for dir_path in dirs:
         image_folder = Path(dir_path)
 
-        all_files = [str(p) for p in image_folder.iterdir() if p.is_file() and p.name != 'final.png']
+        all_files = [str(p) for p in image_folder.iterdir() if p.is_file() and p.name.startswith('compositing')]
 
         if not all_files:
             continue
 
         all_files.sort()
         gen_image_path = all_files[-1]
-        ori_image_path = f'./data/eval_seg_padded/{dir_path.name}.png'
+        ori_image_path = f'./3D_data/images_seg/{dir_path.name}.png'
         print(f'start to analyse image {gen_image_path}')
         gt_3d_kpts = get_gt_3d_for_sample(gt_3d_data, dir_path.name)
 
@@ -1385,7 +1385,7 @@ if __name__ == "__main__":
             ori_image_path,
             gen_image_path,
             reconstructor,
-            annotation_file='./data/filtered_annotations_padded_png.json',
+            annotation_file='./3D_data/annotations_propose_coco.json',
             gt_3d_kpts=gt_3d_kpts,
         )
 
