@@ -739,6 +739,40 @@ def rotation_matrix_to_angle_axis(R):
 
     return float(np.degrees(angle)), axis
 
+def _rigid_rotation_transform_from_points(src, dst):
+    """
+    Estimate rotation + translation only.
+    No scale alignment.
+
+    aligned = (R @ src.T).T + t
+    """
+    src = np.asarray(src, dtype=np.float64)
+    dst = np.asarray(dst, dtype=np.float64)
+
+    mu_src = np.mean(src, axis=0)
+    mu_dst = np.mean(dst, axis=0)
+
+    src_c = src - mu_src
+    dst_c = dst - mu_dst
+
+    H = src_c.T @ dst_c
+    U, S, Vt = np.linalg.svd(H)
+
+    R = Vt.T @ U.T
+
+    if np.linalg.det(R) < 0:
+        Vt[-1, :] *= -1
+        R = Vt.T @ U.T
+
+    t = mu_dst - (R @ mu_src)
+
+    return R, t
+
+
+def _apply_rigid_rotation_transform(points, transform):
+    R, t = transform
+    points = np.asarray(points, dtype=np.float64)
+    return (R @ points.T).T + t
 
 def debug_print_pa_transform(transform, sample_name=""):
     """
@@ -792,17 +826,17 @@ def calculate_aa_3d_metrics(
         If your coordinates are already in mm, set unit_scale=1.0.
     """
     if gt_3d_kpts is None:
-        return None, None
+        return None, None, None
 
     gt_joints_3d = normalize_gt_3d_keypoints(gt_3d_kpts)
     if gt_joints_3d is None:
-        return None, None
+        return None, None, None
 
     pred_root = _get_pelvis_root(pred_joints_3d)
     gt_root = _get_pelvis_root(gt_joints_3d)
 
     if pred_root is None or gt_root is None:
-        return None, None
+        return None, None, None
 
     eval_pred = []
     eval_gt = []
@@ -874,10 +908,17 @@ def calculate_aa_3d_metrics(
     # AA-PA-MPJPE: Procrustes aligned
     # -----------------------------
     aa_pa_mpjpe = None
-
+    aa_r_mpjpe = None
     if len(body_pred) >= 3:
         body_pred = np.asarray(body_pred, dtype=np.float64)
         body_gt = np.asarray(body_gt, dtype=np.float64)
+
+        rigid_transform = _rigid_rotation_transform_from_points(body_pred, body_gt)
+        eval_pred_rigid = _apply_rigid_rotation_transform(eval_pred, rigid_transform)
+
+        aa_r_mpjpe = float(
+            np.mean(np.linalg.norm(eval_pred_rigid - eval_gt, axis=1)) * unit_scale
+        )
 
         transform = _similarity_transform_from_points(body_pred, body_gt)
 
@@ -887,7 +928,7 @@ def calculate_aa_3d_metrics(
             eval_pred_aligned = _apply_similarity_transform(eval_pred, transform)
             aa_pa_mpjpe = float(np.mean(np.linalg.norm(eval_pred_aligned - eval_gt, axis=1)) * unit_scale)
 
-    return aa_mpjpe, aa_pa_mpjpe
+    return aa_mpjpe, aa_r_mpjpe, aa_pa_mpjpe
 
 
 def load_3d_gt_json(gt_3d_json_path):
@@ -1234,7 +1275,7 @@ def main(ori_image_path, gen_image_path, reconstructor, annotation_file, gt_3d_k
     # ============================================================
     img_ori_raw = cv2.imread(ori_image_path, cv2.IMREAD_UNCHANGED)
     if img_ori_raw is None:
-        return 0, 0, 0, None, None
+        return 0, 0, 0, None, None, None
 
     target_h, target_w = int(img_ori_raw.shape[0] / 3), int(img_ori_raw.shape[1] / 3)
 
@@ -1297,7 +1338,7 @@ def main(ori_image_path, gen_image_path, reconstructor, annotation_file, gt_3d_k
             temp_gen_path, mesh_save_path)
     except SystemExit as e:
         print(e)
-        return 0, 0, 0, None, None
+        return 0, 0, 0, None, None, None
 
     global_focal = pred_cam['focal']
     global_cx = pred_cam['princpt'][0]
@@ -1367,7 +1408,7 @@ def main(ori_image_path, gen_image_path, reconstructor, annotation_file, gt_3d_k
         print(f"📊 [量化评估] 完整关节 2D MPJPE: {mpjpe_intact:.2f} pixels")
         print(f"📊 [量化评估] 残肢端点 2D MPJPE: {mpjpe_residual:.2f} pixels")
 
-        aa_mpjpe, aa_pa_mpjpe = calculate_aa_3d_metrics(
+        aa_mpjpe, aa_r_mpjpe, aa_pa_mpjpe = calculate_aa_3d_metrics(
             pred_joints_3d=pred_joints_3d,
             gt_3d_kpts=gt_3d_kpts,
             kpt_types_orig=types_orig,
@@ -1392,10 +1433,15 @@ def main(ori_image_path, gen_image_path, reconstructor, annotation_file, gt_3d_k
         else:
             print("📊 [3D评估] AA-PA-MPJPE: skipped")
 
-        return miou_score, mpjpe_intact, mpjpe_residual, aa_mpjpe, aa_pa_mpjpe
+        if aa_r_mpjpe is not None:
+            print(f"📊 [3D评估] AA-R-MPJPE: {aa_r_mpjpe:.2f} mm")
+        else:
+            print("📊 [3D评估] AA-R-MPJPE: skipped")
+
+        return miou_score, mpjpe_intact, mpjpe_residual, aa_mpjpe, aa_r_mpjpe, aa_pa_mpjpe
 
     # 如果没有 cut tasks，随便返回个值或者 0
-    return 0, 0, 0, None, None
+    return 0, 0, 0, None, None, None
 
 
 if __name__ == "__main__":
@@ -1412,6 +1458,7 @@ if __name__ == "__main__":
     valid_count = 0  # 🌟 必须加上有效计数器
     aa_mpjpe_sum = 0.0
     aa_pa_mpjpe_sum = 0.0
+    aa_r_mpjpe_sum = 0.0
     valid_3d_count = 0
     bad_images = []
 
@@ -1442,7 +1489,7 @@ if __name__ == "__main__":
             print(f"❌ {dir_path.name} 预测失败，跳过统计。")
             continue
 
-        current_miou, current_intact, current_residual, current_aa_mpjpe, current_aa_pa_mpjpe = result
+        current_miou, current_intact, current_residual, current_aa_mpjpe, current_aa_r_mpjpe, current_aa_pa_mpjpe = result
 
         if current_miou < 0.7:
             bad_images.append(dir_path.name)
@@ -1455,6 +1502,7 @@ if __name__ == "__main__":
         if current_aa_mpjpe is not None and current_aa_pa_mpjpe is not None:
             aa_mpjpe_sum += current_aa_mpjpe
             aa_pa_mpjpe_sum += current_aa_pa_mpjpe
+            aa_r_mpjpe_sum += current_aa_r_mpjpe
             valid_3d_count += 1
 
         # 🌟 用 valid_count 算平均值
@@ -1470,5 +1518,6 @@ if __name__ == "__main__":
     if valid_3d_count > 0:
         print(f"   平均 AA-MPJPE: {aa_mpjpe_sum / valid_3d_count:.2f} mm")
         print(f"   平均 AA-PA-MPJPE: {aa_pa_mpjpe_sum / valid_3d_count:.2f} mm")
+        print(f"  平均 AA-R-MPJPE: {aa_r_mpjpe_sum / valid_3d_count:.2f} mm")
     else:
         print("   平均 3D metrics: skipped, no 3D GT found")
