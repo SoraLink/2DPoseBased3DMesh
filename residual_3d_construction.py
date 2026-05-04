@@ -1,4 +1,6 @@
+import json
 import os
+import re
 from pathlib import Path
 
 from main_pipeline import calculate_miou
@@ -314,6 +316,352 @@ def calculate_2d_mpjpe(pred_joints_3d, gt_kpts_orig, global_cam, mapping_dict):
     # 返回所有有效关键点误差的平均值
     return float(np.mean(errors)) if errors else 0.0
 
+GT3D_RAW_TO_PRED_NAME = {
+    "Nose": "nose",
+    "L_Eye": "left_eye",
+    "R_Eye": "right_eye",
+    "L_Ear": "left_ear",
+    "R_Ear": "right_ear",
+    "L_Shoulder": "left_shoulder",
+    "R_Shoulder": "right_shoulder",
+    "L_Elbow": "left_elbow",
+    "R_Elbow": "right_elbow",
+    "L_Wrist": "left_wrist",
+    "R_Wrist": "right_wrist",
+    "L_Hip": "left_hip",
+    "R_Hip": "right_hip",
+    "L_Knee": "left_knee",
+    "R_Knee": "right_knee",
+    "L_Ankle": "left_ankle",
+    "R_Ankle": "right_ankle",
+
+    "L_Finger": "L_Middle_Tip",
+    "R_Finger": "R_Middle_Tip",
+    "L_Heel": "L_Heel",
+    "R_Heel": "R_Heel",
+    "L_Toe": "L_Toe_Tip",
+    "R_Toe": "R_Toe_Tip",
+}
+
+GT3D_RESIDUAL_PAIR_TO_OUTPUT = [
+    ("Residual_L_Upperarm_Front", "Residual_L_Upperarm_Back", "L-Elbow-Res-Above"),
+    ("Residual_R_Upperarm_Front", "Residual_R_Upperarm_Back", "R-Elbow-Res-Above"),
+    ("Residual_L_Forearm_Front", "Residual_L_Forearm_Back", "L-Elbow-Res-Below"),
+    ("Residual_R_Forearm_Front", "Residual_R_Forearm_Back", "R-Elbow-Res-Below"),
+    ("Residual_L_Tigh_Front", "Residual_L_Tigh_Back", "L-Knee-Res-Above"),
+    ("Residual_R_Tigh_Front", "Residual_R_Tigh_Back", "R-Knee-Res-Above"),
+    ("Residual_L_Calf_Front", "Residual_L_Calf_Back", "L-Knee-Res-Below"),
+    ("Residual_R_Calf_Front", "Residual_R_Calf_Back", "R-Knee-Res-Below"),
+]
+
+
+def _to_vec3(v):
+    if v is None or len(v) < 3:
+        return None
+    try:
+        arr = np.asarray(v[:3], dtype=np.float32)
+    except Exception:
+        return None
+    if not np.all(np.isfinite(arr)):
+        return None
+    return arr
+
+
+def _avg_vec3(v1, v2):
+    p1 = _to_vec3(v1)
+    p2 = _to_vec3(v2)
+
+    if p1 is None and p2 is None:
+        return None
+    if p1 is not None and p2 is None:
+        return p1
+    if p2 is not None and p1 is None:
+        return p2
+    return (p1 + p2) / 2.0
+
+
+def normalize_gt_3d_keypoints(gt_3d_kpts):
+    """
+    Convert raw synthetic 3D keypoint dict into prediction-name dict.
+
+    Input example:
+        {
+          "Nose": [x, y, z],
+          "Residual_L_Calf_Front": [x, y, z],
+          ...
+        }
+
+    Output example:
+        {
+          "nose": np.array([x, y, z]),
+          "left_shoulder": ...,
+          "L-Knee-Res-Below": average(front, back),
+          ...
+        }
+    """
+    if gt_3d_kpts is None:
+        return None
+
+    out = {}
+
+    # Standard and terminal points
+    for raw_name, pred_name in GT3D_RAW_TO_PRED_NAME.items():
+        p = _to_vec3(gt_3d_kpts.get(raw_name))
+        if p is not None:
+            out[pred_name] = p
+
+    # Residual endpoints: front/back average
+    for front_name, back_name, out_name in GT3D_RESIDUAL_PAIR_TO_OUTPUT:
+        p = _avg_vec3(gt_3d_kpts.get(front_name), gt_3d_kpts.get(back_name))
+        if p is not None:
+            out[out_name] = p
+
+    return out
+
+
+def _get_pelvis_root(joints_dict):
+    """
+    Root joint = average(left_hip, right_hip).
+    """
+    if joints_dict is None:
+        return None
+
+    left = _to_vec3(joints_dict.get("left_hip"))
+    right = _to_vec3(joints_dict.get("right_hip"))
+
+    if left is None or right is None:
+        return None
+
+    return (left + right) / 2.0
+
+
+def _similarity_transform_from_points(src, dst):
+    """
+    Estimate similarity transform from src to dst using Procrustes alignment.
+
+    src: (N, 3), predicted points
+    dst: (N, 3), GT points
+
+    Return:
+        scale, R, t
+    where:
+        aligned = scale * (R @ src.T).T + t
+    """
+    src = np.asarray(src, dtype=np.float64)
+    dst = np.asarray(dst, dtype=np.float64)
+
+    if src.shape != dst.shape or src.ndim != 2 or src.shape[1] != 3:
+        return None
+
+    if src.shape[0] < 3:
+        return None
+
+    src_t = src.T  # 3 x N
+    dst_t = dst.T  # 3 x N
+
+    mu_src = np.mean(src_t, axis=1, keepdims=True)
+    mu_dst = np.mean(dst_t, axis=1, keepdims=True)
+
+    src_centered = src_t - mu_src
+    dst_centered = dst_t - mu_dst
+
+    var_src = np.sum(src_centered ** 2)
+    if var_src < 1e-12:
+        return None
+
+    K = src_centered @ dst_centered.T
+    U, s, Vt = np.linalg.svd(K)
+    V = Vt.T
+
+    Z = np.eye(3)
+    if np.linalg.det(V @ U.T) < 0:
+        Z[-1, -1] = -1
+
+    R = V @ Z @ U.T
+    scale = np.sum(s * np.diag(Z)) / var_src
+
+    t = mu_dst.squeeze() - scale * (R @ mu_src).squeeze()
+
+    return scale, R, t
+
+
+def _apply_similarity_transform(points, transform):
+    scale, R, t = transform
+    points = np.asarray(points, dtype=np.float64)
+    return scale * (R @ points.T).T + t
+
+
+def calculate_aa_3d_metrics(
+    pred_joints_3d,
+    gt_3d_kpts,
+    kpt_types_orig=None,
+    unit_scale=1000.0,
+):
+    """
+    Compute AA-MPJPE and AA-PA-MPJPE.
+
+    Return:
+        aa_mpjpe, aa_pa_mpjpe
+
+    If gt_3d_kpts is None, return (None, None).
+
+    AA-MPJPE:
+        root-aligned amputation-aware MPJPE.
+        It includes valid standard body joints and existing residual endpoints.
+
+    AA-PA-MPJPE:
+        Procrustes-aligned amputation-aware MPJPE.
+        The similarity transform is estimated using valid standard body joints,
+        then applied to both body joints and residual endpoints.
+
+    unit_scale:
+        1000.0 means meter -> mm.
+        If your coordinates are already in mm, set unit_scale=1.0.
+    """
+    if gt_3d_kpts is None:
+        return None, None
+
+    gt_joints_3d = normalize_gt_3d_keypoints(gt_3d_kpts)
+    if gt_joints_3d is None:
+        return None, None
+
+    pred_root = _get_pelvis_root(pred_joints_3d)
+    gt_root = _get_pelvis_root(gt_joints_3d)
+
+    if pred_root is None or gt_root is None:
+        return None, None
+
+    eval_pred = []
+    eval_gt = []
+
+    body_pred = []
+    body_gt = []
+
+    # Standard body joints: 0-16
+    for idx in range(0, 17):
+        name = METAINFO["keypoint_info"][idx]["name"]
+
+        # If keypoint type exists, only evaluate normal body joints.
+        # type=1 prosthetic, type=2 absent should be skipped.
+        if kpt_types_orig is not None and idx < len(kpt_types_orig):
+            if kpt_types_orig[idx] != 0:
+                continue
+
+        if name not in pred_joints_3d or name not in gt_joints_3d:
+            continue
+
+        p_pred = _to_vec3(pred_joints_3d[name])
+        p_gt = _to_vec3(gt_joints_3d[name])
+
+        if p_pred is None or p_gt is None:
+            continue
+
+        eval_pred.append(p_pred)
+        eval_gt.append(p_gt)
+
+        body_pred.append(p_pred)
+        body_gt.append(p_gt)
+
+    # Residual endpoints: 23-30
+    for idx in range(23, 31):
+        name = METAINFO["keypoint_info"][idx]["name"]
+
+        # Only existing residual endpoints are evaluated.
+        if kpt_types_orig is not None and idx < len(kpt_types_orig):
+            if kpt_types_orig[idx] != 0:
+                continue
+
+        if name not in pred_joints_3d or name not in gt_joints_3d:
+            continue
+
+        p_pred = _to_vec3(pred_joints_3d[name])
+        p_gt = _to_vec3(gt_joints_3d[name])
+
+        if p_pred is None or p_gt is None:
+            continue
+
+        eval_pred.append(p_pred)
+        eval_gt.append(p_gt)
+
+    if len(eval_pred) == 0:
+        return None, None
+
+    eval_pred = np.asarray(eval_pred, dtype=np.float64)
+    eval_gt = np.asarray(eval_gt, dtype=np.float64)
+
+    # -----------------------------
+    # AA-MPJPE: root-aligned
+    # -----------------------------
+    eval_pred_rooted = eval_pred - pred_root
+    eval_gt_rooted = eval_gt - gt_root
+
+    aa_mpjpe = float(np.mean(np.linalg.norm(eval_pred_rooted - eval_gt_rooted, axis=1)) * unit_scale)
+
+    # -----------------------------
+    # AA-PA-MPJPE: Procrustes aligned
+    # -----------------------------
+    aa_pa_mpjpe = None
+
+    if len(body_pred) >= 3:
+        body_pred = np.asarray(body_pred, dtype=np.float64)
+        body_gt = np.asarray(body_gt, dtype=np.float64)
+
+        transform = _similarity_transform_from_points(body_pred, body_gt)
+
+        if transform is not None:
+            eval_pred_aligned = _apply_similarity_transform(eval_pred, transform)
+            aa_pa_mpjpe = float(np.mean(np.linalg.norm(eval_pred_aligned - eval_gt, axis=1)) * unit_scale)
+
+    return aa_mpjpe, aa_pa_mpjpe
+
+
+def load_3d_gt_json(gt_3d_json_path):
+    """
+    Load global_3d_keypoints.json.
+    If path is None or file does not exist, return None.
+    """
+    if gt_3d_json_path is None:
+        return None
+
+    gt_3d_json_path = Path(gt_3d_json_path)
+    if not gt_3d_json_path.exists():
+        return None
+
+    with open(gt_3d_json_path, "r", encoding="utf-8") as f:
+        return json.load(f)
+
+
+def infer_frame_id_from_name(name):
+    """
+    Examples:
+        Camera_View_00_frame_0000 -> 0000
+        frame_0010 -> 0010
+        0010 -> 0010
+    """
+    stem = Path(str(name)).stem
+
+    m = re.search(r"frame_(\d+)", stem)
+    if m:
+        return m.group(1)
+
+    m = re.search(r"(\d{4,})$", stem)
+    if m:
+        return m.group(1)
+
+    return stem
+
+
+def get_gt_3d_for_sample(gt_3d_data, sample_name):
+    """
+    Return one frame's 3D GT dict from global_3d_keypoints.json.
+    If no matched GT, return None.
+    """
+    if gt_3d_data is None:
+        return None
+
+    frame_id = infer_frame_id_from_name(sample_name)
+    return gt_3d_data.get(frame_id, None)
+
 class ResidualMeshCutter2:
     def __init__(self, focal_length, img_center):
         """
@@ -599,7 +947,7 @@ def load_gt_mask(image_path):
     return mask
 
 
-def main(ori_image_path, gen_image_path, reconstructor, annotation_file):
+def main(ori_image_path, gen_image_path, reconstructor, annotation_file, gt_3d_kpts=None):
     kpts_orig, kpts, types_orig = read_kpts_annotation(ori_image_path, annotation_file)
 
     for i in range(len(kpts_orig)):
@@ -611,7 +959,7 @@ def main(ori_image_path, gen_image_path, reconstructor, annotation_file):
     # ============================================================
     img_ori_raw = cv2.imread(ori_image_path, cv2.IMREAD_UNCHANGED)
     if img_ori_raw is None:
-        return 0, 0, 0
+        return 0, 0, 0, None, None
 
     target_h, target_w = int(img_ori_raw.shape[0] / 3), int(img_ori_raw.shape[1] / 3)
 
@@ -674,7 +1022,7 @@ def main(ori_image_path, gen_image_path, reconstructor, annotation_file):
             temp_gen_path, mesh_save_path)
     except SystemExit as e:
         print(e)
-        return 0, 0, 0
+        return 0, 0, 0, None, None
 
     global_focal = pred_cam['focal']
     global_cx = pred_cam['princpt'][0]
@@ -744,15 +1092,33 @@ def main(ori_image_path, gen_image_path, reconstructor, annotation_file):
         print(f"📊 [量化评估] 完整关节 2D MPJPE: {mpjpe_intact:.2f} pixels")
         print(f"📊 [量化评估] 残肢端点 2D MPJPE: {mpjpe_residual:.2f} pixels")
 
-        return miou_score, mpjpe_intact, mpjpe_residual
+        aa_mpjpe, aa_pa_mpjpe = calculate_aa_3d_metrics(
+            pred_joints_3d=pred_joints_3d,
+            gt_3d_kpts=gt_3d_kpts,
+            kpt_types_orig=types_orig,
+            unit_scale=1000.0,  # meter -> mm
+        )
+
+        if aa_mpjpe is not None:
+            print(f"📊 [3D评估] AA-MPJPE: {aa_mpjpe:.2f} mm")
+        else:
+            print("📊 [3D评估] AA-MPJPE: skipped")
+
+        if aa_pa_mpjpe is not None:
+            print(f"📊 [3D评估] AA-PA-MPJPE: {aa_pa_mpjpe:.2f} mm")
+        else:
+            print("📊 [3D评估] AA-PA-MPJPE: skipped")
+
+        return miou_score, mpjpe_intact, mpjpe_residual, aa_mpjpe, aa_pa_mpjpe
 
     # 如果没有 cut tasks，随便返回个值或者 0
-    return 0, 0, 0
+    return 0, 0, 0, None, None
 
 
 if __name__ == "__main__":
     reconstructor = ReconstructionEngine()
-    workdir = Path('./workdir1')
+    workdir = Path('./workdir4')
+    gt_3d_data = load_3d_gt_json("./global_3d_keypoints.json")
 
     # 提前转为 list
     dirs = list(workdir.glob('*'))
@@ -761,6 +1127,9 @@ if __name__ == "__main__":
     mpjpe_intact = 0
     mpjpe_residual = 0
     valid_count = 0  # 🌟 必须加上有效计数器
+    aa_mpjpe_sum = 0.0
+    aa_pa_mpjpe_sum = 0.0
+    valid_3d_count = 0
     bad_images = []
 
     for dir_path in dirs:
@@ -775,16 +1144,22 @@ if __name__ == "__main__":
         gen_image_path = all_files[-1]
         ori_image_path = f'./data/eval_seg_padded/{dir_path.name}.png'
         print(f'start to analyse image {gen_image_path}')
+        gt_3d_kpts = get_gt_3d_for_sample(gt_3d_data, dir_path.name)
 
-        result = main(ori_image_path, gen_image_path, reconstructor,
-                      annotation_file='./data/filtered_annotations_padded_png.json')
+        result = main(
+            ori_image_path,
+            gen_image_path,
+            reconstructor,
+            annotation_file='./data/filtered_annotations_padded_png.json',
+            gt_3d_kpts=gt_3d_kpts,
+        )
 
         # 🌟 跳过失败的预测，防止 0 误差污染平均值
-        if result == (0, 0, 0):
+        if result[0] == 0 and result[1] == 0 and result[2] == 0:
             print(f"❌ {dir_path.name} 预测失败，跳过统计。")
             continue
 
-        current_miou, current_intact, current_residual = result
+        current_miou, current_intact, current_residual, current_aa_mpjpe, current_aa_pa_mpjpe = result
 
         if current_miou < 0.7:
             bad_images.append(dir_path.name)
@@ -793,6 +1168,11 @@ if __name__ == "__main__":
         mpjpe_intact += current_intact
         mpjpe_residual += current_residual
         valid_count += 1
+
+        if current_aa_mpjpe is not None and current_aa_pa_mpjpe is not None:
+            aa_mpjpe_sum += current_aa_mpjpe
+            aa_pa_mpjpe_sum += current_aa_pa_mpjpe
+            valid_3d_count += 1
 
         # 🌟 用 valid_count 算平均值
     if valid_count > 0:
@@ -803,3 +1183,9 @@ if __name__ == "__main__":
         print(f"\n🚨 Bad images (mIoU < 0.7): {bad_images}")
     else:
         print("\n💥 整个数据集处理失败。")
+
+    if valid_3d_count > 0:
+        print(f"   平均 AA-MPJPE: {aa_mpjpe_sum / valid_3d_count:.2f} mm")
+        print(f"   平均 AA-PA-MPJPE: {aa_pa_mpjpe_sum / valid_3d_count:.2f} mm")
+    else:
+        print("   平均 3D metrics: skipped, no 3D GT found")
