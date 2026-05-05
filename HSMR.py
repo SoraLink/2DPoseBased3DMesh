@@ -123,4 +123,77 @@ class ReconstructionEngine:
             'right_ear': vertices[349],
         }
 
+        # 手：沿 elbow -> wrist 方向找 wrist 远端最远 vertex
+        left_hand_dir = pred_joints_dict["left_wrist"] - pred_joints_dict["left_elbow"]
+        right_hand_dir = pred_joints_dict["right_wrist"] - pred_joints_dict["right_elbow"]
+
+        # 脚：沿 knee -> ankle 方向找 ankle 远端最远 vertex
+        # 这里是为了近似完整肢体 hallucination 的最远端。如果你想严格 toe tip，
+        # 后续最好可视化确认固定 toe vertex。
+        left_foot_dir = pred_joints_dict["left_ankle"] - pred_joints_dict["left_knee"]
+        right_foot_dir = pred_joints_dict["right_ankle"] - pred_joints_dict["right_knee"]
+
+        pred_joints_dict.update({
+            "L_Middle_Tip": _terminal_vertex_by_direction(
+                vertices,
+                pred_joints_dict["left_wrist"],
+                left_hand_dir,
+                radius=0.35,
+            ),
+            "R_Middle_Tip": _terminal_vertex_by_direction(
+                vertices,
+                pred_joints_dict["right_wrist"],
+                right_hand_dir,
+                radius=0.35,
+            ),
+            "L_Toe_Tip": _terminal_vertex_by_direction(
+                vertices,
+                pred_joints_dict["left_ankle"],
+                left_foot_dir,
+                radius=0.45,
+            ),
+            "R_Toe_Tip": _terminal_vertex_by_direction(
+                vertices,
+                pred_joints_dict["right_ankle"],
+                right_foot_dir,
+                radius=0.45,
+            ),
+        })
+
         return save_path, pred_joints_dict, res['global_cam'], mesh_obj
+
+def _safe_norm(v, eps=1e-8):
+    n = np.linalg.norm(v)
+    if n < eps:
+        return None
+    return v / n
+
+def _terminal_vertex_by_direction(vertices, anchor, direction, radius=None):
+    """
+    从 anchor 附近/全身 mesh 中，沿 direction 找投影最远的 vertex。
+    用于近似手尖/脚尖 terminal landmark。
+    """
+    direction = _safe_norm(direction)
+    if direction is None:
+        return None
+
+    verts = np.asarray(vertices, dtype=np.float32)
+    anchor = np.asarray(anchor, dtype=np.float32)
+
+    rel = verts - anchor[None, :]
+
+    if radius is not None:
+        dist = np.linalg.norm(rel, axis=1)
+        mask = dist < radius
+        if np.any(mask):
+            cand = verts[mask]
+            rel_cand = cand - anchor[None, :]
+        else:
+            cand = verts
+            rel_cand = rel
+    else:
+        cand = verts
+        rel_cand = rel
+
+    scores = rel_cand @ direction
+    return cand[int(np.argmax(scores))]

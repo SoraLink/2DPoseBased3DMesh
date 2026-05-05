@@ -265,8 +265,85 @@ class ReconstructionEngine:
             'right_ear': vertices[616],
         }
 
+        pred_joints_dict.update({
+            "L_Middle_Tip": _terminal_vertex_near_anchor(
+                vertices,
+                anchor=pred_joints_dict["left_wrist"],
+                reference_joint=pred_joints_dict["left_elbow"],
+                radius=0.30,
+            ),
+            "R_Middle_Tip": _terminal_vertex_near_anchor(
+                vertices,
+                anchor=pred_joints_dict["right_wrist"],
+                reference_joint=pred_joints_dict["right_elbow"],
+                radius=0.30,
+            ),
+            "L_Toe_Tip": _terminal_vertex_near_anchor(
+                vertices,
+                anchor=pred_joints_dict["left_ankle"],
+                reference_joint=pred_joints_dict["left_knee"],
+                radius=0.40,
+            ),
+            "R_Toe_Tip": _terminal_vertex_near_anchor(
+                vertices,
+                anchor=pred_joints_dict["right_ankle"],
+                reference_joint=pred_joints_dict["right_knee"],
+                radius=0.40,
+            ),
+        })
+
         # 🌟 直接返回绝对精准的全局相机参数
         return save_path, pred_joints_dict, res['global_cam'], mesh
+
+def _safe_norm(v, eps=1e-8):
+    n = np.linalg.norm(v)
+    if n < eps:
+        return None
+    return v / n
+
+
+def _terminal_vertex_near_anchor(vertices, anchor, reference_joint, radius):
+    """
+    Find the terminal surface point near an anchor joint.
+
+    - hand terminal: anchor = wrist, reference_joint = elbow
+    - foot terminal: anchor = ankle, reference_joint = knee
+    """
+    verts = np.asarray(vertices, dtype=np.float32)
+    anchor = np.asarray(anchor, dtype=np.float32)
+    reference_joint = np.asarray(reference_joint, dtype=np.float32)
+
+    dist_to_anchor = np.linalg.norm(verts - anchor[None, :], axis=1)
+    mask = dist_to_anchor < radius
+
+    if np.any(mask):
+        candidates = verts[mask]
+    else:
+        candidates = verts
+
+    scores = np.linalg.norm(candidates - reference_joint[None, :], axis=1)
+    return candidates[int(np.argmax(scores))]
+
+
+def _terminal_vertex_by_distance(vertices, anchor, radius=None):
+    """
+    在 anchor 附近，找距离 anchor 最远的点。
+    适合近似 hand fingertip，因为手指方向可能和 forearm 方向不完全一致。
+    """
+    verts = np.asarray(vertices, dtype=np.float32)
+    anchor = np.asarray(anchor, dtype=np.float32)
+
+    rel = verts - anchor[None, :]
+    dist = np.linalg.norm(rel, axis=1)
+
+    if radius is not None:
+        mask = dist < radius
+        if np.any(mask):
+            cand = verts[mask]
+            dist_cand = dist[mask]
+            return cand[int(np.argmax(dist_cand))]
+
+    return verts[int(np.argmax(dist))]
 
 
 # if __name__ == "__main__":
