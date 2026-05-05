@@ -607,44 +607,60 @@ def _avg_vec3(v1, v2):
     return (p1 + p2) / 2.0
 
 
-def normalize_gt_3d_keypoints(gt_3d_kpts):
-    """
-    Convert raw synthetic 3D keypoint dict into prediction-name dict.
+def get_output_keypoint_names():
+    return [METAINFO["keypoint_info"][i]["name"] for i in range(31)]
 
-    Input example:
-        {
-          "Nose": [x, y, z],
-          "Residual_L_Calf_Front": [x, y, z],
-          ...
-        }
 
-    Output example:
-        {
-          "nose": np.array([x, y, z]),
-          "left_shoulder": ...,
-          "L-Knee-Res-Below": average(front, back),
-          ...
-        }
+def _flat_3d_keypoints_to_dict(keypoints_3d):
     """
-    if gt_3d_kpts is None:
+    New merged format:
+        keypoints_3d = [x, y, z, v, x, y, z, v, ...]
+    """
+    if keypoints_3d is None:
         return None
 
     out = {}
 
-    # Standard and terminal points
+    for idx in range(31):
+        name = METAINFO["keypoint_info"][idx]["name"]
+        base = idx * 4
+
+        if base + 3 >= len(keypoints_3d):
+            continue
+
+        x, y, z, v = keypoints_3d[base:base + 4]
+
+        if v <= 0:
+            continue
+
+        p = np.asarray([x, y, z], dtype=np.float32)
+        if np.all(np.isfinite(p)):
+            out[name] = p
+
+    return out
+
+def normalize_gt_3d_keypoints(gt_3d_kpts):
+    if gt_3d_kpts is None:
+        return None
+
+    # New merged annotation format
+    if isinstance(gt_3d_kpts, dict) and "keypoints_3d" in gt_3d_kpts:
+        return _flat_3d_keypoints_to_dict(gt_3d_kpts["keypoints_3d"])
+
+    # Old raw global_3d_keypoints.json format
+    out = {}
+
     for raw_name, pred_name in GT3D_RAW_TO_PRED_NAME.items():
         p = _to_vec3(gt_3d_kpts.get(raw_name))
         if p is not None:
             out[pred_name] = p
 
-    # Residual endpoints: front/back average
     for front_name, back_name, out_name in GT3D_RESIDUAL_PAIR_TO_OUTPUT:
         p = _avg_vec3(gt_3d_kpts.get(front_name), gt_3d_kpts.get(back_name))
         if p is not None:
             out[out_name] = p
 
     return out
-
 
 def _get_pelvis_root(joints_dict):
     """
@@ -891,7 +907,7 @@ def calculate_aa_3d_metrics(
         eval_gt.append(p_gt)
 
     if len(eval_pred) == 0:
-        return None, None
+        return None, None, None
 
     eval_pred = np.asarray(eval_pred, dtype=np.float64)
     eval_gt = np.asarray(eval_gt, dtype=np.float64)
@@ -1228,6 +1244,50 @@ class ResidualMeshCutter2:
 
         return sealed_mesh
 
+def load_merged_3d_annotations(ann3d_path):
+    with open(ann3d_path, "r", encoding="utf-8") as f:
+        ann3d = json.load(f)
+
+    return {
+        ann["id"]: ann
+        for ann in ann3d.get("annotations", [])
+    }
+
+
+def load_2d_image_to_gt3d_map(ann2d_path):
+    """
+    Build mapping:
+        image stem -> gt3d_id
+
+    Example image stem:
+        demo16__Camera_View_07__frame_0130
+    """
+    with open(ann2d_path, "r", encoding="utf-8") as f:
+        ann2d = json.load(f)
+
+    mapping = {}
+
+    for img_info in ann2d.get("images", []):
+        stem = Path(img_info["file_name"]).stem
+        mapping[stem] = img_info.get("gt3d_id")
+
+    return mapping
+
+
+def get_gt_3d_for_sample_from_merged(sample_name, image_to_gt3d, ann3d_by_id):
+    sample_stem = Path(str(sample_name)).stem
+
+    gt3d_id = image_to_gt3d.get(sample_stem)
+    if gt3d_id is None:
+        print(f"⚠️ No gt3d_id found for sample: {sample_stem}")
+        return None
+
+    gt3d_ann = ann3d_by_id.get(gt3d_id)
+    if gt3d_ann is None:
+        print(f"⚠️ No 3D annotation found for gt3d_id={gt3d_id}")
+        return None
+
+    return gt3d_ann
 
 def load_gt_mask(image_path):
     """
@@ -1447,8 +1507,12 @@ def main(ori_image_path, gen_image_path, reconstructor, annotation_file, gt_3d_k
 if __name__ == "__main__":
     reconstructor = ReconstructionEngine()
     workdir = Path('./workdir9')
-    gt_3d_data = load_3d_gt_json("./3D_data/global_3d_keypoints.json")
 
+    ann2d_path = "./3D_data/annotations_2d_propose_coco.json"
+    ann3d_path = "./3D_data/annotations_3d_propose.json"
+
+    image_to_gt3d = load_2d_image_to_gt3d_map(ann2d_path)
+    ann3d_by_id = load_merged_3d_annotations(ann3d_path)
     # 提前转为 list
     dirs = list(workdir.glob('*'))
 
@@ -1474,13 +1538,16 @@ if __name__ == "__main__":
         gen_image_path = all_files[-1]
         ori_image_path = f'./3D_data/images_seg/{dir_path.name}.png'
         print(f'start to analyse image {gen_image_path}')
-        gt_3d_kpts = get_gt_3d_for_sample(gt_3d_data, dir_path.name)
-
+        gt_3d_kpts = get_gt_3d_for_sample_from_merged(
+            sample_name=dir_path.name,
+            image_to_gt3d=image_to_gt3d,
+            ann3d_by_id=ann3d_by_id,
+        )
         result = main(
             ori_image_path,
             gen_image_path,
             reconstructor,
-            annotation_file='./3D_data/annotations_propose_coco.json',
+            annotation_file=ann2d_path,
             gt_3d_kpts=gt_3d_kpts,
         )
 
@@ -1499,7 +1566,11 @@ if __name__ == "__main__":
         mpjpe_residual += current_residual
         valid_count += 1
 
-        if current_aa_mpjpe is not None and current_aa_pa_mpjpe is not None:
+        if (
+                current_aa_mpjpe is not None
+                and current_aa_r_mpjpe is not None
+                and current_aa_pa_mpjpe is not None
+        ):
             aa_mpjpe_sum += current_aa_mpjpe
             aa_pa_mpjpe_sum += current_aa_pa_mpjpe
             aa_r_mpjpe_sum += current_aa_r_mpjpe
