@@ -918,7 +918,7 @@ def calculate_aa_3d_metrics(
         if pred_name is None or pred_name not in pred_joints_3d:
             continue
 
-        p_pred = _to_vec3(pred_joints_3d[name])
+        p_pred = _to_vec3(pred_joints_3d[pred_name])
         p_gt = _to_vec3(gt_joints_3d[name])
 
         if p_pred is None or p_gt is None:
