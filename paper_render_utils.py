@@ -4,17 +4,10 @@ def render_cut_mesh_overlay(
     pred_cam: dict,
     out_path: str,
     color=(0.30, 0.75, 0.95),
-    alpha=0.82,
-    edge_color=(40, 95, 140),   # BGR for OpenCV edge drawing
-    edge_alpha=0.45,
-    edge_width=1,
 ):
     """
-    High-quality renderer for cut / residual mesh.
-    Compared with a plain translucent mask, this version adds:
-      1. stronger lighting/shading
-      2. a light wireframe overlay
-    so the result looks like a real mesh instead of a flat mask.
+    Render cut / residual mesh as an opaque shaded mesh without transparency
+    and without wireframe lines.
     """
     import os
     os.environ.setdefault("PYOPENGL_PLATFORM", "egl")
@@ -36,9 +29,6 @@ def render_cut_mesh_overlay(
     vertices_cv = np.asarray(mesh.vertices).copy()
     faces = np.asarray(mesh.faces)
 
-    # =========================================================
-    # 1. Render solid mesh with proper shading
-    # =========================================================
     # OpenCV camera coordinates -> OpenGL coordinates
     vertices_gl = vertices_cv.copy()
     vertices_gl[:, 1] *= -1.0
@@ -50,11 +40,12 @@ def render_cut_mesh_overlay(
         process=False,
     )
 
+    # 纯实心材质，不透明
     material = pyrender.MetallicRoughnessMaterial(
         metallicFactor=0.05,
-        roughnessFactor=0.70,
-        alphaMode="BLEND",
-        baseColorFactor=(color[0], color[1], color[2], alpha),
+        roughnessFactor=0.75,
+        alphaMode="OPAQUE",
+        baseColorFactor=(color[0], color[1], color[2], 1.0),
     )
 
     render_mesh = pyrender.Mesh.from_trimesh(
@@ -77,7 +68,7 @@ def render_cut_mesh_overlay(
     )
     scene.add(camera, pose=np.eye(4))
 
-    # multi-light setup for better 3D feeling
+    # 多灯光，保证有立体感
     light_main = pyrender.DirectionalLight(color=np.ones(3), intensity=3.0)
     light_fill = pyrender.DirectionalLight(color=np.ones(3), intensity=1.8)
     light_back = pyrender.DirectionalLight(color=np.ones(3), intensity=1.2)
@@ -98,56 +89,15 @@ def render_cut_mesh_overlay(
         viewport_height=h,
     )
 
-    color_rgba, depth = renderer.render(scene, flags=pyrender.RenderFlags.RGBA)
+    color_rgba, _ = renderer.render(scene, flags=pyrender.RenderFlags.RGBA)
     renderer.delete()
 
-    mesh_rgb = cv2.cvtColor(color_rgba[:, :, :3], cv2.COLOR_RGB2BGR).astype(np.float32)
-    mesh_alpha = color_rgba[:, :, 3:4].astype(np.float32) / 255.0
+    # 只在 mesh 区域覆盖原图，不做半透明混合
+    rendered_bgr = cv2.cvtColor(color_rgba[:, :, :3], cv2.COLOR_RGB2BGR)
+    alpha_mask = color_rgba[:, :, 3] > 0
 
-    base = mesh_rgb * mesh_alpha + img.astype(np.float32) * (1.0 - mesh_alpha)
-    base = np.clip(base, 0, 255).astype(np.uint8)
-
-    # =========================================================
-    # 2. Add projected wireframe to emphasize "mesh feeling"
-    # =========================================================
-    verts = vertices_cv
-    z = verts[:, 2].copy()
-
-    # avoid division by zero
-    valid_z = z > 1e-6
-
-    proj = np.zeros((verts.shape[0], 2), dtype=np.float32)
-    proj[valid_z, 0] = fx * (verts[valid_z, 0] / z[valid_z]) + cx
-    proj[valid_z, 1] = fy * (verts[valid_z, 1] / z[valid_z]) + cy
-
-    # collect unique edges from faces
-    edges = set()
-    for f in faces:
-        a, b, c = int(f[0]), int(f[1]), int(f[2])
-        edges.add(tuple(sorted((a, b))))
-        edges.add(tuple(sorted((b, c))))
-        edges.add(tuple(sorted((a, c))))
-
-    wire = base.copy()
-
-    for i, j in edges:
-        if not (valid_z[i] and valid_z[j]):
-            continue
-
-        x1, y1 = proj[i]
-        x2, y2 = proj[j]
-
-        # skip obviously off-image edges
-        if ((x1 < -50 and x2 < -50) or (x1 > w + 50 and x2 > w + 50) or
-            (y1 < -50 and y2 < -50) or (y1 > h + 50 and y2 > h + 50)):
-            continue
-
-        p1 = (int(round(x1)), int(round(y1)))
-        p2 = (int(round(x2)), int(round(y2)))
-
-        cv2.line(wire, p1, p2, edge_color, edge_width, lineType=cv2.LINE_AA)
-
-    out = cv2.addWeighted(wire, edge_alpha, base, 1.0 - edge_alpha, 0)
+    out = img.copy()
+    out[alpha_mask] = rendered_bgr[alpha_mask]
 
     cv2.imwrite(out_path, out)
     return out_path

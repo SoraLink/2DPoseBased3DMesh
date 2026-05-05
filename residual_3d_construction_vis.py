@@ -1577,13 +1577,16 @@ if __name__ == "__main__":
         #     image_to_gt3d=image_to_gt3d,
         #     ann3d_by_id=ann3d_by_id,
         # )
-        result = main(
-            ori_image_path,
-            gen_image_path,
-            reconstructor,
-            annotation_file=ann2d_path,
-            gt_3d_kpts=None,
-        )
+        try:
+            result = main(
+                ori_image_path,
+                gen_image_path,
+                reconstructor,
+                annotation_file=ann2d_path,
+                gt_3d_kpts=None,
+            )
+        except Exception as e:
+            continue
 
         # 🌟 跳过失败的预测，防止 0 误差污染平均值
         if result[0] == 0 and result[1] == 0 and result[2] == 0:
