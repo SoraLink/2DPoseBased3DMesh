@@ -4,10 +4,18 @@ def render_cut_mesh_overlay(
     pred_cam: dict,
     out_path: str,
     color=(0.30, 0.75, 0.95),
+    alpha=1.0,
+    edge_color=(40, 95, 140),
+    edge_alpha=0.0,
+    edge_width=0,
 ):
     """
-    Render cut / residual mesh as an opaque shaded mesh without transparency
-    and without wireframe lines.
+    High-quality opaque renderer for cut / residual mesh.
+
+    This version keeps the old function signature for compatibility, but:
+      - does not use transparency blending
+      - does not draw wireframe / stripe lines
+      - renders an opaque shaded mesh on top of the image
     """
     import os
     os.environ.setdefault("PYOPENGL_PLATFORM", "egl")
@@ -29,7 +37,7 @@ def render_cut_mesh_overlay(
     vertices_cv = np.asarray(mesh.vertices).copy()
     faces = np.asarray(mesh.faces)
 
-    # OpenCV camera coordinates -> OpenGL coordinates
+    # OpenCV camera coordinates -> OpenGL camera coordinates for pyrender
     vertices_gl = vertices_cv.copy()
     vertices_gl[:, 1] *= -1.0
     vertices_gl[:, 2] *= -1.0
@@ -40,10 +48,10 @@ def render_cut_mesh_overlay(
         process=False,
     )
 
-    # 纯实心材质，不透明
+    # Opaque material: alpha is kept in the signature but not used for blending.
     material = pyrender.MetallicRoughnessMaterial(
         metallicFactor=0.05,
-        roughnessFactor=0.75,
+        roughnessFactor=0.72,
         alphaMode="OPAQUE",
         baseColorFactor=(color[0], color[1], color[2], 1.0),
     )
@@ -56,7 +64,7 @@ def render_cut_mesh_overlay(
 
     scene = pyrender.Scene(
         bg_color=[0.0, 0.0, 0.0, 0.0],
-        ambient_light=[0.22, 0.22, 0.22],
+        ambient_light=[0.28, 0.28, 0.28],
     )
     scene.add(render_mesh)
 
@@ -68,16 +76,17 @@ def render_cut_mesh_overlay(
     )
     scene.add(camera, pose=np.eye(4))
 
-    # 多灯光，保证有立体感
+    # Lighting only, no wireframe.
     light_main = pyrender.DirectionalLight(color=np.ones(3), intensity=3.0)
-    light_fill = pyrender.DirectionalLight(color=np.ones(3), intensity=1.8)
-    light_back = pyrender.DirectionalLight(color=np.ones(3), intensity=1.2)
+    light_fill = pyrender.DirectionalLight(color=np.ones(3), intensity=1.6)
+    light_back = pyrender.DirectionalLight(color=np.ones(3), intensity=1.0)
 
     pose_main = np.eye(4)
-    pose_fill = np.eye(4)
-    pose_back = np.eye(4)
 
+    pose_fill = np.eye(4)
     pose_fill[:3, 3] = np.array([0.35, 0.20, 0.60])
+
+    pose_back = np.eye(4)
     pose_back[:3, 3] = np.array([-0.30, -0.20, 0.50])
 
     scene.add(light_main, pose=pose_main)
@@ -89,15 +98,20 @@ def render_cut_mesh_overlay(
         viewport_height=h,
     )
 
-    color_rgba, _ = renderer.render(scene, flags=pyrender.RenderFlags.RGBA)
+    color_rgba, depth = renderer.render(
+        scene,
+        flags=pyrender.RenderFlags.RGBA,
+    )
     renderer.delete()
 
-    # 只在 mesh 区域覆盖原图，不做半透明混合
     rendered_bgr = cv2.cvtColor(color_rgba[:, :, :3], cv2.COLOR_RGB2BGR)
-    alpha_mask = color_rgba[:, :, 3] > 0
+
+    # Use rendered alpha/depth only as a visibility mask.
+    # No alpha blending with the original image.
+    visible_mask = color_rgba[:, :, 3] > 0
 
     out = img.copy()
-    out[alpha_mask] = rendered_bgr[alpha_mask]
+    out[visible_mask] = rendered_bgr[visible_mask]
 
     cv2.imwrite(out_path, out)
     return out_path
