@@ -27,6 +27,18 @@ RES_BONE_MAPPING = {
     'R-Knee-Res-Below': ('right_knee', 'right_ankle')
 }
 
+RESIDUAL_TO_TERMINAL = {
+    "L-Elbow-Res-Above": "L_Middle_Tip",
+    "L-Elbow-Res-Below": "L_Middle_Tip",
+    "R-Elbow-Res-Above": "R_Middle_Tip",
+    "R-Elbow-Res-Below": "R_Middle_Tip",
+
+    "L-Knee-Res-Above": "L_Toe_Tip",
+    "L-Knee-Res-Below": "L_Toe_Tip",
+    "R-Knee-Res-Above": "R_Toe_Tip",
+    "R-Knee-Res-Below": "R_Toe_Tip",
+}
+
 METAINFO = {
     'dataset_name': 'ld_pros_pose',
     'classes': ('person',),
@@ -894,7 +906,16 @@ def calculate_aa_3d_metrics(
             if kpt_types_orig[idx] != 0:
                 continue
 
-        if name not in pred_joints_3d or name not in gt_joints_3d:
+        if name not in gt_joints_3d:
+            continue
+
+        if name in pred_joints_3d:
+            pred_name = name
+        else:
+            # Direct complete-body HMR baseline: use terminal landmark surrogate.
+            pred_name = RESIDUAL_TO_TERMINAL.get(name)
+
+        if pred_name is None or pred_name not in pred_joints_3d:
             continue
 
         p_pred = _to_vec3(pred_joints_3d[name])

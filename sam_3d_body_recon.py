@@ -119,6 +119,13 @@ class ReconstructionEngine:
                 'left_ankle': joints_3d[13],
                 'right_ankle': joints_3d[14],
 
+                'L_Middle_Tip': joints_3d[50],
+                'R_Middle_Tip': joints_3d[29],
+                'L_Heel': joints_3d[17],
+                'R_Heel': joints_3d[20],
+                'L_Toe_Tip': joints_3d[15],  # or average of 15 and 16
+                'R_Toe_Tip': joints_3d[18],  # or average of 18 and 19
+
                 # 衍生点
                 'pelvis': (joints_3d[9] + joints_3d[10]) / 2.0,
                 'neck': (joints_3d[5] + joints_3d[6]) / 2.0
