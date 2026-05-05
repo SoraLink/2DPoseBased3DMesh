@@ -3,7 +3,7 @@ def render_cut_mesh_overlay(
     mesh,
     pred_cam: dict,
     out_path: str,
-    color=(0.30, 0.75, 0.95),
+    color=(0.92, 0.92, 0.92),
     alpha=1.0,
     edge_color=(40, 95, 140),
     edge_alpha=0.0,

@@ -242,7 +242,7 @@ class ReconstructionEngine:
             mesh=mesh,
             pred_cam=pred_cam,
             out_path=out_path,
-            color=(0.15, 0.70, 1.00),
+            color=(0.92, 0.92, 0.92),
             alpha=0.80,
         )
 
