@@ -1586,7 +1586,7 @@ if __name__ == "__main__":
                 gt_3d_kpts=None,
             )
         except Exception as e:
-            continue
+            raise e
 
         # 🌟 跳过失败的预测，防止 0 误差污染平均值
         if result[0] == 0 and result[1] == 0 and result[2] == 0:
