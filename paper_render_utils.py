@@ -17,6 +17,8 @@ def render_cut_mesh_overlay(
       - does not draw wireframe / stripe lines
       - renders an opaque shaded mesh on top of the image
     """
+
+    color=(0.78, 0.78, 0.78)
     import os
     os.environ.setdefault("PYOPENGL_PLATFORM", "egl")
 

@@ -306,7 +306,7 @@ class ReconstructionEngine:
             mesh=mesh,
             pred_cam=pred_cam,
             out_path=out_path,
-            color=(0.35, 0.65, 1.0),
+            color=(0.95, 0.95, 0.95),
             alpha=0.65,
         )
 
@@ -316,7 +316,7 @@ class ReconstructionEngine:
             mesh=mesh,
             pred_cam=pred_cam,
             out_path=out_path,
-            color=(0.15, 0.78, 0.92),
+            color=(0.95, 0.95, 0.95),
             alpha=0.78,
         )
 
@@ -348,7 +348,7 @@ class ReconstructionEngine:
         }
 
 def _render_smplx_mesh_overlay(image_path: str, mesh, pred_cam: dict, out_path: str,
-                               color=(0.35, 0.65, 1.0), alpha=0.65):
+                               color=(0.95, 0.95, 0.95), alpha=0.65):
     import os
     os.environ.setdefault("PYOPENGL_PLATFORM", "egl")
 
