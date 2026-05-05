@@ -1346,9 +1346,9 @@ def load_gt_mask(image_path):
 def main(ori_image_path, gen_image_path, reconstructor, annotation_file, gt_3d_kpts=None):
     kpts_orig, kpts, types_orig = read_kpts_annotation(ori_image_path, annotation_file)
 
-    for i in range(len(kpts_orig)):
-        kpts_orig[i][0] /= 3.0  # x 坐标缩小
-        kpts_orig[i][1] /= 3.0  # y 坐标缩小
+    # for i in range(len(kpts_orig)):
+    #     kpts_orig[i][0] /= 3.0  # x 坐标缩小
+    #     kpts_orig[i][1] /= 3.0  # y 坐标缩小
 
     # ============================================================
     # 1. 提取真实的 GT Mask (基于原图 Alpha 通道或灰度图) 算 mIoU 用
@@ -1357,7 +1357,7 @@ def main(ori_image_path, gen_image_path, reconstructor, annotation_file, gt_3d_k
     if img_ori_raw is None:
         return 0, 0, 0, None, None, None
 
-    target_h, target_w = int(img_ori_raw.shape[0] / 3), int(img_ori_raw.shape[1] / 3)
+    target_h, target_w = int(img_ori_raw.shape[0]), int(img_ori_raw.shape[1])
 
     if len(img_ori_raw.shape) == 3 and img_ori_raw.shape[2] == 4:
         alpha_channel = img_ori_raw[:, :, 3]
@@ -1384,7 +1384,7 @@ def main(ori_image_path, gen_image_path, reconstructor, annotation_file, gt_3d_k
     base_name_ori, _ = os.path.splitext(ori_image_path)
     temp_ori_path = f"{base_name_ori}_white_resized.jpg"
     cv2.imwrite(temp_ori_path, image_ori_resized)
-    ori_image_path = temp_ori_path
+    # ori_image_path = temp_ori_path
 
     # ============================================================
     # 3. 🌟 新增：制作白底的生成图 (Gen)
