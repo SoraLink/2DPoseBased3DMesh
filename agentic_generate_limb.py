@@ -64,7 +64,7 @@ class LimbCompositingAgent:
         if conf_thr is None:
             conf_thr = getattr(self, "conf_thr", 0.10)
         if pose_tau is None:
-            pose_tau = getattr(self, "pose_tau", 0.045)
+            pose_tau = getattr(self, "pose_tau", 0.06)
 
         orig = cv2.imread(orig_image_path)
         gen = cv2.imread(gen_image_path)
@@ -185,7 +185,7 @@ class LimbCompositingAgent:
         if conf_thr is None:
             conf_thr = getattr(self, "conf_thr", 0.10)
         if perp_tau is None:
-            perp_tau = getattr(self, "perp_tau", 0.15)
+            perp_tau = getattr(self, "perp_tau", 0.12)
 
         orig = cv2.imread(orig_image_path)
         gen = cv2.imread(gen_image_path)
@@ -772,8 +772,8 @@ class LimbCompositingAgent:
         - pose displacement debug
         - direction / projection debug
         """
-        pose_tau = getattr(self, "pose_tau", 0.045)
-        perp_tau = getattr(self, "perp_tau", 0.15)
+        pose_tau = getattr(self, "pose_tau", 0.06)
+        perp_tau = getattr(self, "perp_tau", 0.12)
         conf_thr = getattr(self, "conf_thr", 0.10)
 
         kpts_orig = np.asarray(kpts_orig, dtype=np.float32)
@@ -1349,7 +1349,7 @@ class LimbCompositingAgent:
 if __name__ == "__main__":
     image_dir = Path('./3D_data/images_seg')
     # image_dir = Path('./eval')
-    save_dir = Path('./workdir4')
+    save_dir = Path('./workdir10')
 
     # pose_extractor = PoseExtractor(
     #     config_file='./models/pose/vit_config.py',
@@ -1365,7 +1365,7 @@ if __name__ == "__main__":
     agent = LimbCompositingAgent(pose_extractor)
 
     # 1. 一次性读取 COCO 格式的 JSON
-    annotation_path = Path('./3D_data/annotations_propose_coco.json')
+    annotation_path = Path('./3D_data/annotations_2d_propose_coco.json')
     with open(annotation_path, 'r', encoding='utf-8') as f:
         coco_data = json.load(f)
 
@@ -1389,7 +1389,7 @@ if __name__ == "__main__":
 
     # 4. 开始遍历本地文件夹里的图片
     for i, image_path in enumerate(image_dir.glob('*.png')):
-        if i > 10: break
+        if i < 10: continue
         img_name = image_path.name  # 取纯文件名
 
         # 5. 精准匹配
