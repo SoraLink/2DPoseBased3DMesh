@@ -6,7 +6,7 @@ import matplotlib.pyplot as plt
 
 from main_pipeline import calculate_miou
 from pose_extractor import read_kpts_annotation
-from HSMR import ReconstructionEngine
+from sam_3d_body_recon import ReconstructionEngine
 
 import os
 import cv2
@@ -939,7 +939,7 @@ def calculate_aa_3d_metrics(
         transform = _similarity_transform_from_points(body_pred, body_gt)
 
         if transform is not None:
-            debug_print_pa_transform(transform)
+            # debug_print_pa_transform(transform)
 
             eval_pred_aligned = _apply_similarity_transform(eval_pred, transform)
             aa_pa_mpjpe = float(np.mean(np.linalg.norm(eval_pred_aligned - eval_gt, axis=1)) * unit_scale)
@@ -1506,7 +1506,7 @@ def main(ori_image_path, gen_image_path, reconstructor, annotation_file, gt_3d_k
 
 if __name__ == "__main__":
     reconstructor = ReconstructionEngine()
-    workdir = Path('./workdir9')
+    workdir = Path('./workdir10')
 
     ann2d_path = "./3D_data/annotations_2d_propose_coco.json"
     ann3d_path = "./3D_data/annotations_3d_propose.json"
@@ -1560,7 +1560,9 @@ if __name__ == "__main__":
 
         if current_miou < 0.7:
             bad_images.append(dir_path.name)
-
+        if current_miou < 0.1:
+            print(f"❌ {dir_path.name} 预测失败，跳过统计。")
+            continue
         miou += current_miou
         mpjpe_intact += current_intact
         mpjpe_residual += current_residual
