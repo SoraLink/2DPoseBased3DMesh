@@ -307,19 +307,19 @@ class ReconstructionEngine:
             pred_cam=pred_cam,
             out_path=out_path,
             color=(0.95, 0.95, 0.95),
-            alpha=0.65,
+            alpha=0.9,
         )
 
     def render_cut_projection(self, image_path: str, out_path: str, mesh, pred_cam):
-        return _render_smplx_mesh_overlay(
+        from paper_render_utils import render_cut_mesh_overlay
+        return render_cut_mesh_overlay(
             image_path=image_path,
             mesh=mesh,
             pred_cam=pred_cam,
             out_path=out_path,
-            color=(0.95, 0.95, 0.95),
-            alpha=0.78,
+            color=(0.92, 0.92, 0.92),
+            alpha=0.80,
         )
-
     def render_paper_projections(self, image_path: str, out_dir: str, whole_mesh=None, cut_mesh=None, pred_cam=None):
         import os
         os.makedirs(out_dir, exist_ok=True)
