@@ -162,6 +162,117 @@ class ReconstructionEngine:
 
         return save_path, pred_joints_dict, res['global_cam'], mesh_obj
 
+    @torch.no_grad()
+    def render_wholebody_projection(self, image_path: str, out_path: str, mesh=None, pred_cam=None):
+        """
+        Whole-body projection using HSMR official style:
+        skin mesh + skeleton mesh.
+        """
+        import cv2
+        import torch
+        from lib.kits.hsmr_demo import imgs_det2patches, prepare_mesh
+        from lib.utils.vis.py_renderer import render_meshes_overlay_img
+
+        img = cv2.imread(image_path)
+        if img is None:
+            raise ValueError(f"Cannot read image: {image_path}")
+
+        raw_h, raw_w = img.shape[:2]
+        raw_cx, raw_cy = raw_w / 2.0, raw_h / 2.0
+
+        raw_imgs = [img]
+
+        detector_outputs = self.detector(raw_imgs)
+        patches, det_meta = imgs_det2patches(
+            raw_imgs,
+            *detector_outputs,
+            max_instances_per_img=1,
+        )
+
+        if len(patches) == 0:
+            raise ValueError("HSMR failed to detect a person.")
+
+        patches_normalized = (patches - IMG_MEAN_255) / IMG_STD_255
+        patches_normalized = torch.from_numpy(patches_normalized).permute(0, 3, 1, 2).to(self.device)
+
+        outputs = self.pipeline(patches_normalized)
+
+        pd_params = {k: v.detach().cpu() for k, v in outputs["pd_params"].items()}
+        pd_cam_t = outputs["pd_cam_t"].detach().cpu()
+
+        m_skin, m_skel = prepare_mesh(self.pipeline, pd_params)
+
+        bbx_cs = torch.as_tensor(det_meta["bbx_cs"], dtype=torch.float32)
+
+        raw_cam_t = pd_cam_t.clone().float()
+        raw_cam_t[:, 2] = pd_cam_t[:, 2] * 256.0 / bbx_cs[:, 2]
+        raw_cam_t[:, 0] += (bbx_cs[:, 0] - raw_cx) / 5000.0 * raw_cam_t[:, 2]
+        raw_cam_t[:, 1] += (bbx_cs[:, 1] - raw_cy) / 5000.0 * raw_cam_t[:, 2]
+
+        K4 = [5000.0, 5000.0, raw_cx, raw_cy]
+
+        skin_img = render_meshes_overlay_img(
+            faces_all=m_skin["f"],
+            verts_all=m_skin["v"].float(),
+            cam_t_all=raw_cam_t,
+            mesh_color="blue",
+            img=img.copy(),
+            K4=K4,
+            view="front",
+        )
+
+        skel_img = render_meshes_overlay_img(
+            faces_all=m_skel["f"],
+            verts_all=m_skel["v"].float(),
+            cam_t_all=raw_cam_t,
+            mesh_color="human_yellow",
+            img=img.copy(),
+            K4=K4,
+            view="front",
+        )
+
+        out_img = cv2.addWeighted(skin_img, 0.7, skel_img, 0.3, 0)
+        cv2.imwrite(out_path, out_img)
+        return out_path
+
+    def render_cut_projection(self, image_path: str, out_path: str, mesh, pred_cam):
+        from paper_render_utils import render_cut_mesh_overlay
+        return render_cut_mesh_overlay(
+            image_path=image_path,
+            mesh=mesh,
+            pred_cam=pred_cam,
+            out_path=out_path,
+            color=(0.15, 0.70, 1.00),
+            alpha=0.80,
+        )
+
+    def render_paper_projections(self, image_path: str, out_dir: str, whole_mesh=None, cut_mesh=None, pred_cam=None):
+        import os
+        os.makedirs(out_dir, exist_ok=True)
+
+        whole_path = os.path.join(out_dir, "paper_projection_whole.jpg")
+        cut_path = os.path.join(out_dir, "paper_projection_cut.jpg")
+
+        self.render_wholebody_projection(
+            image_path=image_path,
+            out_path=whole_path,
+            mesh=whole_mesh,
+            pred_cam=pred_cam,
+        )
+
+        if cut_mesh is not None:
+            self.render_cut_projection(
+                image_path=image_path,
+                out_path=cut_path,
+                mesh=cut_mesh,
+                pred_cam=pred_cam,
+            )
+
+        return {
+            "whole": whole_path,
+            "cut": cut_path if cut_mesh is not None else None,
+        }
+
 def _safe_norm(v, eps=1e-8):
     n = np.linalg.norm(v)
     if n < eps:

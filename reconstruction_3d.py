@@ -295,6 +295,127 @@ class ReconstructionEngine:
         # 🌟 直接返回绝对精准的全局相机参数
         return save_path, pred_joints_dict, res['global_cam'], mesh
 
+    def render_wholebody_projection(self, image_path: str, out_path: str, mesh=None, pred_cam=None):
+        if mesh is None:
+            raise ValueError("SMPLest-X whole-body rendering requires mesh.")
+        if pred_cam is None:
+            raise ValueError("SMPLest-X whole-body rendering requires pred_cam.")
+
+        return _render_smplx_mesh_overlay(
+            image_path=image_path,
+            mesh=mesh,
+            pred_cam=pred_cam,
+            out_path=out_path,
+            color=(0.35, 0.65, 1.0),
+            alpha=0.65,
+        )
+
+    def render_cut_projection(self, image_path: str, out_path: str, mesh, pred_cam):
+        return _render_smplx_mesh_overlay(
+            image_path=image_path,
+            mesh=mesh,
+            pred_cam=pred_cam,
+            out_path=out_path,
+            color=(0.15, 0.78, 0.92),
+            alpha=0.78,
+        )
+
+    def render_paper_projections(self, image_path: str, out_dir: str, whole_mesh=None, cut_mesh=None, pred_cam=None):
+        import os
+        os.makedirs(out_dir, exist_ok=True)
+
+        whole_path = os.path.join(out_dir, "paper_projection_whole.jpg")
+        cut_path = os.path.join(out_dir, "paper_projection_cut.jpg")
+
+        self.render_wholebody_projection(
+            image_path=image_path,
+            out_path=whole_path,
+            mesh=whole_mesh,
+            pred_cam=pred_cam,
+        )
+
+        if cut_mesh is not None:
+            self.render_cut_projection(
+                image_path=image_path,
+                out_path=cut_path,
+                mesh=cut_mesh,
+                pred_cam=pred_cam,
+            )
+
+        return {
+            "whole": whole_path,
+            "cut": cut_path if cut_mesh is not None else None,
+        }
+
+def _render_smplx_mesh_overlay(image_path: str, mesh, pred_cam: dict, out_path: str,
+                               color=(0.35, 0.65, 1.0), alpha=0.65):
+    import os
+    os.environ.setdefault("PYOPENGL_PLATFORM", "egl")
+
+    import cv2
+    import numpy as np
+    import trimesh
+    import pyrender
+
+    img = cv2.imread(image_path)
+    if img is None:
+        raise ValueError(f"Cannot read image: {image_path}")
+
+    h, w = img.shape[:2]
+    fx, fy = pred_cam["focal"]
+    cx, cy = pred_cam["princpt"]
+
+    vertices = np.asarray(mesh.vertices).copy()
+    faces = np.asarray(mesh.faces)
+
+    vertices[:, 1] *= -1.0
+    vertices[:, 2] *= -1.0
+
+    vertex_colors = np.ones((vertices.shape[0], 4), dtype=np.float32)
+    vertex_colors[:, 0] = color[0]
+    vertex_colors[:, 1] = color[1]
+    vertex_colors[:, 2] = color[2]
+    vertex_colors[:, 3] = alpha
+
+    tri_mesh = trimesh.Trimesh(
+        vertices=vertices,
+        faces=faces,
+        vertex_colors=vertex_colors,
+        process=False,
+    )
+
+    render_mesh = pyrender.Mesh.from_trimesh(tri_mesh, smooth=True)
+
+    scene = pyrender.Scene(
+        bg_color=[0.0, 0.0, 0.0, 0.0],
+        ambient_light=[0.35, 0.35, 0.35],
+    )
+    scene.add(render_mesh)
+
+    camera = pyrender.IntrinsicsCamera(
+        fx=float(fx),
+        fy=float(fy),
+        cx=float(cx),
+        cy=float(cy),
+    )
+    scene.add(camera, pose=np.eye(4))
+
+    light = pyrender.DirectionalLight(color=np.ones(3), intensity=2.5)
+    scene.add(light, pose=np.eye(4))
+
+    renderer = pyrender.OffscreenRenderer(viewport_width=w, viewport_height=h)
+    color_rgba, _ = renderer.render(scene, flags=pyrender.RenderFlags.RGBA)
+    renderer.delete()
+
+    mesh_rgb = cv2.cvtColor(color_rgba[:, :, :3], cv2.COLOR_RGB2BGR).astype(np.float32)
+    mesh_alpha = color_rgba[:, :, 3:4].astype(np.float32) / 255.0
+
+    out = mesh_rgb * mesh_alpha + img.astype(np.float32) * (1.0 - mesh_alpha)
+    out = np.clip(out, 0, 255).astype(np.uint8)
+
+    cv2.imwrite(out_path, out)
+    return out_path
+
 def _safe_norm(v, eps=1e-8):
     n = np.linalg.norm(v)
     if n < eps:
