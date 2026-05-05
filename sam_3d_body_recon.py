@@ -132,3 +132,67 @@ class ReconstructionEngine:
             }
 
         return save_path, pred_joints_dict, global_cam, mesh
+
+    def render_wholebody_projection(self, image_path: str, out_path: str, mesh=None, pred_cam=None):
+        """
+        Whole-body projection using SAM 3D Body official visualization.
+        """
+        import cv2
+        import numpy as np
+        from tools.vis_utils import visualize_sample_together
+
+        img_bgr = cv2.imread(image_path)
+        if img_bgr is None:
+            raise ValueError(f"Cannot read image: {image_path}")
+
+        outputs = self.estimator.process_one_image(image_path)
+        if outputs is None or len(outputs) == 0:
+            raise ValueError("SAM 3D Body failed to detect a person.")
+
+        rendered = visualize_sample_together(
+            img_bgr,
+            outputs,
+            self.estimator.faces,
+        )
+
+        rendered = np.asarray(rendered).astype(np.uint8)
+        cv2.imwrite(out_path, rendered)
+        return out_path
+
+    def render_cut_projection(self, image_path: str, out_path: str, mesh, pred_cam):
+        from paper_render_utils import render_cut_mesh_overlay
+        return render_cut_mesh_overlay(
+            image_path=image_path,
+            mesh=mesh,
+            pred_cam=pred_cam,
+            out_path=out_path,
+            color=(0.25, 0.80, 0.95),
+            alpha=0.78,
+        )
+
+    def render_paper_projections(self, image_path: str, out_dir: str, whole_mesh=None, cut_mesh=None, pred_cam=None):
+        import os
+        os.makedirs(out_dir, exist_ok=True)
+
+        whole_path = os.path.join(out_dir, "paper_projection_whole.jpg")
+        cut_path = os.path.join(out_dir, "paper_projection_cut.jpg")
+
+        self.render_wholebody_projection(
+            image_path=image_path,
+            out_path=whole_path,
+            mesh=whole_mesh,
+            pred_cam=pred_cam,
+        )
+
+        if cut_mesh is not None:
+            self.render_cut_projection(
+                image_path=image_path,
+                out_path=cut_path,
+                mesh=cut_mesh,
+                pred_cam=pred_cam,
+            )
+
+        return {
+            "whole": whole_path,
+            "cut": cut_path if cut_mesh is not None else None,
+        }
