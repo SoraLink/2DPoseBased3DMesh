@@ -136,6 +136,8 @@ class ReconstructionEngine:
     def render_wholebody_projection(self, image_path: str, out_path: str, mesh=None, pred_cam=None):
         """
         Whole-body projection using SAM 3D Body official visualization.
+        The official visualization returns a 4-panel image, so we crop the mesh
+        projection panel for paper use.
         """
         import cv2
         import numpy as np
@@ -156,7 +158,29 @@ class ReconstructionEngine:
         )
 
         rendered = np.asarray(rendered).astype(np.uint8)
-        cv2.imwrite(out_path, rendered)
+
+        # Optional: save the original 4-panel visualization for debugging
+        full_out_path = out_path.replace(".jpg", "_full.jpg").replace(".png", "_full.png")
+        cv2.imwrite(full_out_path, rendered)
+
+        # SAM3D official visualization is usually:
+        # [input | 2D/skeleton | mesh projection | standalone mesh]
+        render_h, render_w = rendered.shape[:2]
+
+        # Split into 4 equal panels and keep the 3rd one.
+        panel_w = render_w // 4
+        projection_panel = rendered[:, 2 * panel_w: 3 * panel_w]
+
+        # Resize back to the original input image size if needed
+        h, w = img_bgr.shape[:2]
+        if projection_panel.shape[:2] != (h, w):
+            projection_panel = cv2.resize(
+                projection_panel,
+                (w, h),
+                interpolation=cv2.INTER_AREA,
+            )
+
+        cv2.imwrite(out_path, projection_panel)
         return out_path
 
     def render_cut_projection(self, image_path: str, out_path: str, mesh, pred_cam):
