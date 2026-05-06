@@ -2356,7 +2356,7 @@ def main(ori_image_path, gen_image_path, reconstructor, annotation_file, gt_3d_k
         print("Cut-mesh projection:", paper_paths["cut"])
     except Exception as e:
         print(f"⚠️ paper visualization skipped: {e}")
-
+        traceback.print_exc()
     # ============================================================
     # 10. 返回给外层统计
     # 这里 mIoU 用 merged_miou；MPJPE 用 matched persons 的平均。

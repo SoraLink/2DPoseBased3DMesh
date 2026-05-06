@@ -351,48 +351,60 @@ class ReconstructionEngine:
             whole_mesh_cam_items=None,
             cut_mesh_cam_items=None,
     ):
-        """
-        Paper projection renderer.
-
-        支持两种模式：
-        1. 旧版单人 / 单相机模式：
-           - whole_mesh + cut_mesh + pred_cam
-        2. 新版多人 crop-based 模式：
-           - whole_mesh_cam_items=[{"mesh":..., "pred_cam":...}, ...]
-           - cut_mesh_cam_items=[{"mesh":..., "pred_cam":...}, ...]
-        """
         import os
+
         os.makedirs(out_dir, exist_ok=True)
 
         whole_path = os.path.join(out_dir, "paper_projection_whole.jpg")
         cut_path = os.path.join(out_dir, "paper_projection_cut.jpg")
 
+        print(f"[PaperVis] out_dir = {out_dir}")
+        print(f"[PaperVis] whole_mesh_cam_items = {0 if whole_mesh_cam_items is None else len(whole_mesh_cam_items)}")
+        print(f"[PaperVis] cut_mesh_cam_items   = {0 if cut_mesh_cam_items is None else len(cut_mesh_cam_items)}")
+
         # ---------------------------------------------------------
         # Multi-person crop-based mode
         # ---------------------------------------------------------
         if whole_mesh_cam_items is not None or cut_mesh_cam_items is not None:
+            whole_exists = False
+            cut_exists = False
+
             if whole_mesh_cam_items is not None and len(whole_mesh_cam_items) > 0:
+                print(f"[PaperVis] rendering WHOLE -> {whole_path}")
                 self.render_multi_wholebody_projection(
                     image_path=image_path,
                     out_path=whole_path,
                     whole_mesh_cam_items=whole_mesh_cam_items,
                 )
+                whole_exists = os.path.exists(whole_path)
+                print(f"[PaperVis] whole exists? {whole_exists}")
 
             if cut_mesh_cam_items is not None and len(cut_mesh_cam_items) > 0:
+                print(f"[PaperVis] rendering CUT -> {cut_path}")
                 self.render_multi_cut_projection(
                     image_path=image_path,
                     out_path=cut_path,
                     cut_mesh_cam_items=cut_mesh_cam_items,
                 )
+                cut_exists = os.path.exists(cut_path)
+                print(f"[PaperVis] cut exists? {cut_exists}")
+
+            if whole_mesh_cam_items is not None and len(whole_mesh_cam_items) > 0 and not whole_exists:
+                raise RuntimeError(f"[PaperVis] whole projection was not saved: {whole_path}")
+
+            if cut_mesh_cam_items is not None and len(cut_mesh_cam_items) > 0 and not cut_exists:
+                raise RuntimeError(f"[PaperVis] cut projection was not saved: {cut_path}")
 
             return {
-                "whole": whole_path if whole_mesh_cam_items is not None and len(whole_mesh_cam_items) > 0 else None,
-                "cut": cut_path if cut_mesh_cam_items is not None and len(cut_mesh_cam_items) > 0 else None,
+                "whole": whole_path if whole_exists else None,
+                "cut": cut_path if cut_exists else None,
             }
 
         # ---------------------------------------------------------
         # Legacy single-person mode
         # ---------------------------------------------------------
+        print("[PaperVis] legacy single-person mode")
+
         self.render_wholebody_projection(
             image_path=image_path,
             out_path=whole_path,
@@ -400,6 +412,10 @@ class ReconstructionEngine:
             pred_cam=pred_cam,
         )
 
+        if not os.path.exists(whole_path):
+            raise RuntimeError(f"[PaperVis] whole projection was not saved: {whole_path}")
+
+        cut_exists = False
         if cut_mesh is not None:
             self.render_cut_projection(
                 image_path=image_path,
@@ -407,10 +423,13 @@ class ReconstructionEngine:
                 mesh=cut_mesh,
                 pred_cam=pred_cam,
             )
+            cut_exists = os.path.exists(cut_path)
+            if not cut_exists:
+                raise RuntimeError(f"[PaperVis] cut projection was not saved: {cut_path}")
 
         return {
             "whole": whole_path,
-            "cut": cut_path if cut_mesh is not None else None,
+            "cut": cut_path if cut_exists else None,
         }
 
     def _render_multi_mesh_overlay(
@@ -500,13 +519,22 @@ class ReconstructionEngine:
         mask_bool = merged_mask > 127
         img_out[mask_bool] = overlay[mask_bool]
 
-        cv2.imwrite(out_path, img_out)
+        ok, buf = cv2.imencode(".jpg", img_out)
+        if not ok:
+            raise RuntimeError(f"Failed to encode image for saving: {out_path}")
+        buf.tofile(out_path)
+
+        if not os.path.exists(out_path):
+            raise RuntimeError(f"Failed to save image: {out_path}")
+
         return out_path
 
     def render_multi_wholebody_projection(self, image_path: str, out_path: str, whole_mesh_cam_items):
         """
         Multi-person whole-body projection for paper.
         """
+        print(f"[PaperVis] render_multi_wholebody_projection: persons={len(whole_mesh_cam_items)}, out={out_path}")
+
         return self._render_multi_mesh_overlay(
             image_path=image_path,
             out_path=out_path,
@@ -519,6 +547,8 @@ class ReconstructionEngine:
         """
         Multi-person cut-mesh projection for paper.
         """
+        print(f"[PaperVis] render_multi_cut_projection: persons={len(cut_mesh_cam_items)}, out={out_path}")
+
         return self._render_multi_mesh_overlay(
             image_path=image_path,
             out_path=out_path,
