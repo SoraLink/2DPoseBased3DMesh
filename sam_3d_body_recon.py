@@ -536,12 +536,10 @@ class ReconstructionEngine:
         """
         print(f"[PaperVis] render_multi_wholebody_projection: persons={len(whole_mesh_cam_items)}, out={out_path}")
 
-        return self._render_multi_mesh_overlay(
+        return self._render_multi_solid_mesh_projection(
             image_path=image_path,
             out_path=out_path,
             mesh_cam_items=whole_mesh_cam_items,
-            color=(0.78, 0.78, 0.78),
-            alpha=0.78,
         )
 
     def render_multi_cut_projection(self, image_path: str, out_path: str, cut_mesh_cam_items):
@@ -550,10 +548,72 @@ class ReconstructionEngine:
         """
         print(f"[PaperVis] render_multi_cut_projection: persons={len(cut_mesh_cam_items)}, out={out_path}")
 
-        return self._render_multi_mesh_overlay(
+        return self._render_multi_solid_mesh_projection(
             image_path=image_path,
             out_path=out_path,
             mesh_cam_items=cut_mesh_cam_items,
-            color=(0.78, 0.78, 0.78),
-            alpha=0.78,
         )
+
+    def _render_multi_solid_mesh_projection(
+            self,
+            image_path: str,
+            out_path: str,
+            mesh_cam_items,
+    ):
+        """
+        Multi-person solid pyrender projection.
+        每个人都调用原来的 render_cut_mesh_overlay()。
+        颜色和 alpha 在底层 render_cut_mesh_overlay 里锁死：
+            color=(0.58, 0.58, 0.58)
+            alpha=1.0
+        """
+        import os
+        import shutil
+        import numpy as np
+
+        if mesh_cam_items is None or len(mesh_cam_items) == 0:
+            return None
+
+        tmp_dir = os.path.join(os.path.dirname(out_path), "_paper_vis_tmp")
+        os.makedirs(tmp_dir, exist_ok=True)
+
+        # 从远到近画，近的人覆盖远的人
+        def depth_key(item):
+            mesh = item["mesh"]
+            if mesh is None or len(mesh.vertices) == 0:
+                return -1e9
+            return float(np.median(np.asarray(mesh.vertices)[:, 2]))
+
+        sorted_items = sorted(mesh_cam_items, key=depth_key, reverse=True)
+
+        canvas_path = image_path
+
+        for idx, item in enumerate(sorted_items):
+            mesh = item["mesh"]
+            pred_cam = item.get("pred_cam", item.get("cam", None))
+
+            if pred_cam is None:
+                raise KeyError(
+                    f"mesh_cam_items[{idx}] has no 'pred_cam' or 'cam'. "
+                    f"Available keys: {list(item.keys())}"
+                )
+
+            if idx == len(sorted_items) - 1:
+                step_out = out_path
+            else:
+                step_out = os.path.join(tmp_dir, f"step_{idx:02d}.jpg")
+
+            self.render_cut_projection(
+                image_path=canvas_path,
+                out_path=step_out,
+                mesh=mesh,
+                pred_cam=pred_cam,
+            )
+
+            canvas_path = step_out
+
+        if not os.path.exists(out_path):
+            raise RuntimeError(f"Failed to save solid multi mesh projection: {out_path}")
+
+        shutil.rmtree(tmp_dir, ignore_errors=True)
+        return out_path
