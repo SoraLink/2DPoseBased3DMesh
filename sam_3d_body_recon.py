@@ -341,13 +341,58 @@ class ReconstructionEngine:
             alpha=0.78,
         )
 
-    def render_paper_projections(self, image_path: str, out_dir: str, whole_mesh=None, cut_mesh=None, pred_cam=None):
+    def render_paper_projections(
+            self,
+            image_path: str,
+            out_dir: str,
+            whole_mesh=None,
+            cut_mesh=None,
+            pred_cam=None,
+            whole_mesh_cam_items=None,
+            cut_mesh_cam_items=None,
+    ):
+        """
+        Paper projection renderer.
+
+        支持两种模式：
+        1. 旧版单人 / 单相机模式：
+           - whole_mesh + cut_mesh + pred_cam
+        2. 新版多人 crop-based 模式：
+           - whole_mesh_cam_items=[{"mesh":..., "pred_cam":...}, ...]
+           - cut_mesh_cam_items=[{"mesh":..., "pred_cam":...}, ...]
+        """
         import os
         os.makedirs(out_dir, exist_ok=True)
 
         whole_path = os.path.join(out_dir, "paper_projection_whole.jpg")
         cut_path = os.path.join(out_dir, "paper_projection_cut.jpg")
 
+        # ---------------------------------------------------------
+        # Multi-person crop-based mode
+        # ---------------------------------------------------------
+        if whole_mesh_cam_items is not None or cut_mesh_cam_items is not None:
+            if whole_mesh_cam_items is not None and len(whole_mesh_cam_items) > 0:
+                self.render_multi_wholebody_projection(
+                    image_path=image_path,
+                    out_path=whole_path,
+                    whole_mesh_cam_items=whole_mesh_cam_items,
+                )
+
+            if cut_mesh_cam_items is not None and len(cut_mesh_cam_items) > 0:
+                self.render_multi_cut_projection(
+                    image_path=image_path,
+                    out_path=cut_path,
+                    cut_mesh_cam_items=cut_mesh_cam_items,
+                )
+
+            return {
+                "whole": whole_path if whole_mesh_cam_items is not None and len(whole_mesh_cam_items) > 0 else None,
+                "cut": cut_path if cut_mesh_cam_items is not None and len(cut_mesh_cam_items) > 0 else None,
+            }
+
+        # ---------------------------------------------------------
+        # Legacy single-person mode
+        # ---------------------------------------------------------
         self.render_wholebody_projection(
             image_path=image_path,
             out_path=whole_path,
@@ -367,3 +412,117 @@ class ReconstructionEngine:
             "whole": whole_path,
             "cut": cut_path if cut_mesh is not None else None,
         }
+
+    def _render_multi_mesh_overlay(
+            self,
+            image_path: str,
+            out_path: str,
+            mesh_cam_items,
+            color=(0.78, 0.78, 0.78),
+            alpha=0.78,
+    ):
+        """
+        Multi-person projection renderer.
+        Each mesh uses its own camera intrinsics, then all masks are merged.
+
+        mesh_cam_items:
+            [
+                {"mesh": mesh0, "pred_cam": cam0},
+                {"mesh": mesh1, "pred_cam": cam1},
+                ...
+            ]
+        """
+        import cv2
+        import numpy as np
+
+        img = cv2.imread(image_path, cv2.IMREAD_COLOR)
+        if img is None:
+            raise ValueError(f"Cannot read image: {image_path}")
+
+        h, w = img.shape[:2]
+        merged_mask = np.zeros((h, w), dtype=np.uint8)
+
+        for item_idx, item in enumerate(mesh_cam_items):
+            mesh = item["mesh"]
+            pred_cam = item["pred_cam"]
+
+            if mesh is None or pred_cam is None:
+                continue
+
+            f = pred_cam["focal"]
+            c = pred_cam["princpt"]
+
+            K = np.array([
+                [f[0], 0, c[0]],
+                [0, f[1], c[1]],
+                [0, 0, 1],
+            ], dtype=np.float32)
+
+            vertices = np.asarray(mesh.vertices, dtype=np.float32)
+            faces = np.asarray(mesh.faces, dtype=np.int32)
+
+            if len(vertices) == 0 or len(faces) == 0:
+                continue
+
+            pts_3d = vertices.T  # (3, N)
+            pts_2d_homo = K @ pts_3d
+            zs = pts_2d_homo[2, :]
+
+            zs_clamped = np.maximum(zs, 1e-5)
+            u = pts_2d_homo[0, :] / zs_clamped
+            v = pts_2d_homo[1, :] / zs_clamped
+            projected_pts = np.stack([u, v], axis=1).astype(np.int32)
+
+            person_mask = np.zeros((h, w), dtype=np.uint8)
+
+            for face in faces:
+                # 只画在相机前方的面
+                if np.all(zs[face] > 0.1):
+                    pts = projected_pts[face].reshape((-1, 1, 2))
+                    cv2.fillPoly(person_mask, [pts], 255)
+
+            merged_mask = cv2.bitwise_or(merged_mask, person_mask)
+
+        # 颜色转 0-255
+        overlay_color = np.array(color, dtype=np.float32)
+        if overlay_color.max() <= 1.0:
+            overlay_color = (overlay_color * 255.0).astype(np.uint8)
+        else:
+            overlay_color = overlay_color.astype(np.uint8)
+
+        overlay = img.copy()
+        color_layer = np.zeros_like(img, dtype=np.uint8)
+        color_layer[:] = overlay_color.tolist()
+
+        cv2.addWeighted(color_layer, alpha, overlay, 1 - alpha, 0, dst=overlay)
+
+        img_out = img.copy()
+        mask_bool = merged_mask > 127
+        img_out[mask_bool] = overlay[mask_bool]
+
+        cv2.imwrite(out_path, img_out)
+        return out_path
+
+    def render_multi_wholebody_projection(self, image_path: str, out_path: str, whole_mesh_cam_items):
+        """
+        Multi-person whole-body projection for paper.
+        """
+        return self._render_multi_mesh_overlay(
+            image_path=image_path,
+            out_path=out_path,
+            mesh_cam_items=whole_mesh_cam_items,
+            color=(0.78, 0.78, 0.78),
+            alpha=0.78,
+        )
+
+    def render_multi_cut_projection(self, image_path: str, out_path: str, cut_mesh_cam_items):
+        """
+        Multi-person cut-mesh projection for paper.
+        """
+        return self._render_multi_mesh_overlay(
+            image_path=image_path,
+            out_path=out_path,
+            mesh_cam_items=cut_mesh_cam_items,
+            color=(0.78, 0.78, 0.78),
+            alpha=0.78,
+        )

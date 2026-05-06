@@ -2088,6 +2088,7 @@ def main(ori_image_path, gen_image_path, reconstructor, annotation_file, gt_3d_k
     all_whole_meshes = []
     all_cut_meshes = []
     all_cut_mesh_cam_items = []
+    all_whole_mesh_cam_items = []
 
     miou_scores = []
     mpjpe_intact_scores = []
@@ -2120,6 +2121,11 @@ def main(ori_image_path, gen_image_path, reconstructor, annotation_file, gt_3d_k
         pred_cam = pred["pred_cam"]
 
         all_whole_meshes.append(whole_mesh)
+        all_whole_mesh_cam_items.append({
+            "mesh": whole_mesh,
+            "pred_cam": global_cam,
+            "person_idx": pred_idx,
+        })
 
         global_focal = pred_cam["focal"]
         global_cx = pred_cam["princpt"][0]
@@ -2342,9 +2348,8 @@ def main(ori_image_path, gen_image_path, reconstructor, annotation_file, gt_3d_k
         paper_paths = reconstructor.render_paper_projections(
             image_path=ori_image_path,
             out_dir=paper_vis_dir,
-            whole_mesh=merged_whole_mesh,
-            cut_mesh=merged_cut_mesh,
-            pred_cam=pred_cam0,
+            whole_mesh_cam_items=all_whole_mesh_cam_items,
+            cut_mesh_cam_items=all_cut_mesh_cam_items,
         )
 
         print("Whole-body projection:", paper_paths["whole"])
