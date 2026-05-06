@@ -1430,6 +1430,92 @@ def match_annotations_to_predictions(person_annotations, pred_results):
 
     return pairs
 
+def project_multi_mesh_overlay(image_path, gen_image_path, mesh_cam_items, output_dir, is_full=False):
+    """
+    多人 crop-based projection:
+    每个 mesh 使用自己的 pred_cam 投影，最后合并到同一张 overlay 图上。
+
+    mesh_cam_items:
+        [
+            {"mesh": mesh0, "cam": pred_cam0},
+            {"mesh": mesh1, "cam": pred_cam1},
+            ...
+        ]
+    """
+    os.makedirs(output_dir, exist_ok=True)
+
+    def render_overlay(img_path, suffix):
+        img_data = np.fromfile(img_path, dtype=np.uint8)
+        img = cv2.imdecode(img_data, cv2.IMREAD_COLOR)
+
+        if img is None:
+            raise ValueError(f"Cannot read image: {img_path}")
+
+        h, w = img.shape[:2]
+        merged_mask = np.zeros((h, w), dtype=np.uint8)
+
+        for item_idx, item in enumerate(mesh_cam_items):
+            mesh = item["mesh"]
+            cam = item["cam"]
+
+            f = cam["focal"]
+            c = cam["princpt"]
+
+            K = np.array([
+                [f[0], 0, c[0]],
+                [0, f[1], c[1]],
+                [0, 0, 1],
+            ], dtype=np.float32)
+
+            vertices = np.asarray(mesh.vertices)
+            faces = mesh.faces.astype(np.int32)
+
+            pts_3d = vertices.T
+            pts_2d_homo = K @ pts_3d
+            zs = pts_2d_homo[2, :]
+
+            zs_clamped = np.maximum(zs, 1e-5)
+            u = pts_2d_homo[0, :] / zs_clamped
+            v = pts_2d_homo[1, :] / zs_clamped
+
+            projected_pts = np.stack([u, v], axis=1).astype(np.int32)
+
+            person_mask = np.zeros((h, w), dtype=np.uint8)
+
+            for face in faces:
+                if np.all(zs[face] > 0.1):
+                    pts = projected_pts[face].reshape((-1, 1, 2))
+                    cv2.fillPoly(person_mask, [pts], 255)
+
+            merged_mask = cv2.bitwise_or(merged_mask, person_mask)
+
+        overlay = img.copy()
+        overlay_color = np.zeros_like(img)
+        overlay_color[:] = [0, 255, 0]
+
+        cv2.addWeighted(overlay_color, 0.5, overlay, 0.5, 0, dst=overlay)
+
+        img_out = img.copy()
+        mask_bool = merged_mask > 127
+        img_out[mask_bool] = overlay[mask_bool]
+
+        base_name = os.path.splitext(os.path.basename(img_path))[0]
+        out_name = f"{base_name}_{suffix}.jpg"
+        out_path = os.path.join(output_dir, out_name)
+
+        cv2.imencode(".jpg", img_out)[1].tofile(out_path)
+
+        return out_path, merged_mask
+
+    if is_full:
+        gen_out_path, mask_gen = render_overlay(gen_image_path, "gen_projection_full")
+        orig_out_path, mask_orig = render_overlay(image_path, "orig_projection_full")
+    else:
+        gen_out_path, mask_gen = render_overlay(gen_image_path, "gen_projection")
+        orig_out_path, mask_orig = render_overlay(image_path, "orig_projection")
+
+    return orig_out_path, mask_orig, gen_out_path, mask_gen
+
 def main(ori_image_path, gen_image_path, reconstructor, annotation_file, gt_3d_kpts=None):
     """
     Multi-person version.
@@ -2001,6 +2087,7 @@ def main(ori_image_path, gen_image_path, reconstructor, annotation_file, gt_3d_k
     # ============================================================
     all_whole_meshes = []
     all_cut_meshes = []
+    all_cut_mesh_cam_items = []
 
     miou_scores = []
     mpjpe_intact_scores = []
@@ -2096,6 +2183,13 @@ def main(ori_image_path, gen_image_path, reconstructor, annotation_file, gt_3d_k
         if not cut_tasks:
             print(f"⚠️ person {pred_idx}: no cut_tasks, keep whole mesh.")
             all_cut_meshes.append(mesh)
+
+            all_cut_mesh_cam_items.append({
+                "mesh": mesh,
+                "cam": global_cam,
+                "person_idx": pred_idx,
+            })
+
             continue
 
         # --------------------------------------------------------
@@ -2117,6 +2211,12 @@ def main(ori_image_path, gen_image_path, reconstructor, annotation_file, gt_3d_k
                 pred_joints_3d[task["name"]] = task["cut_origin"]
 
         all_cut_meshes.append(cut_mesh)
+
+        all_cut_mesh_cam_items.append({
+            "mesh": cut_mesh,
+            "cam": global_cam,
+            "person_idx": pred_idx,
+        })
 
         # --------------------------------------------------------
         # 单人 2D metric
@@ -2220,22 +2320,19 @@ def main(ori_image_path, gen_image_path, reconstructor, annotation_file, gt_3d_k
     # ============================================================
     # 9. 合并后的整体 projection / mIoU
     # ============================================================
-    pred_cam0 = pred_results[0]["pred_cam"]
-    global_cam0 = {
-        "focal": pred_cam0["focal"],
-        "princpt": pred_cam0["princpt"],
-    }
+    merged_proj_dir = os.path.join(dir_name, "merged_projection")
+    os.makedirs(merged_proj_dir, exist_ok=True)
 
-    orig_proj_path, pred_mask_orig, gen_proj_path, pred_mask_gen = project_mesh_overlay(
-        ori_image_path,
-        temp_gen_path,
-        merged_cut_mesh,
-        global_cam0,
-        dir_name,
+    orig_proj_path, pred_mask_orig, gen_proj_path, pred_mask_gen = project_multi_mesh_overlay(
+        image_path=ori_image_path,
+        gen_image_path=temp_gen_path,
+        mesh_cam_items=all_cut_mesh_cam_items,
+        output_dir=merged_proj_dir,
     )
 
     merged_miou = calculate_miou(pred_mask_orig, mask_gt_resized)
     print(f"📊 [merged all persons] mIoU: {merged_miou:.4f}")
+    print(f"✅ merged multi-camera projection saved: {orig_proj_path}")
 
     # paper visualization: 尝试保存合并后的可视化
     try:
