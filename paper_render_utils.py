@@ -18,7 +18,7 @@ def render_cut_mesh_overlay(
       - renders an opaque shaded mesh on top of the image
     """
 
-    color=(0.78, 0.78, 0.78)
+    color=(0.58, 0.58, 0.58)
     import os
     os.environ.setdefault("PYOPENGL_PLATFORM", "egl")
 
@@ -52,10 +52,10 @@ def render_cut_mesh_overlay(
 
     # Opaque material: alpha is kept in the signature but not used for blending.
     material = pyrender.MetallicRoughnessMaterial(
-        metallicFactor=0.05,
-        roughnessFactor=0.72,
+        metallicFactor=0.0,
+        roughnessFactor=0.95,
         alphaMode="OPAQUE",
-        baseColorFactor=(color[0], color[1], color[2], 1.0),
+        baseColorFactor=(0.58, 0.58, 0.58, 1.0),
     )
 
     render_mesh = pyrender.Mesh.from_trimesh(
@@ -66,7 +66,7 @@ def render_cut_mesh_overlay(
 
     scene = pyrender.Scene(
         bg_color=[0.0, 0.0, 0.0, 0.0],
-        ambient_light=[0.28, 0.28, 0.28],
+        ambient_light=[0.06, 0.06, 0.06],
     )
     scene.add(render_mesh)
 
@@ -79,8 +79,8 @@ def render_cut_mesh_overlay(
     scene.add(camera, pose=np.eye(4))
 
     # Lighting only, no wireframe.
-    light_main = pyrender.DirectionalLight(color=np.ones(3), intensity=3.0)
-    light_fill = pyrender.DirectionalLight(color=np.ones(3), intensity=1.6)
+    light_main = pyrender.DirectionalLight(color=np.ones(3), intensity=1.6)
+    light_fill = pyrender.DirectionalLight(color=np.ones(3), intensity=0.6)
     light_back = pyrender.DirectionalLight(color=np.ones(3), intensity=1.0)
 
     pose_main = np.eye(4)
