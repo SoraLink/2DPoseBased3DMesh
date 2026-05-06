@@ -1703,6 +1703,118 @@ def main(ori_image_path, gen_image_path, reconstructor, annotation_file, gt_3d_k
 
         return pred_results
 
+    def _predict_mesh_from_gt_crops(image_path, person_annotations, save_dir, pad_ratio=0.15):
+        """
+        用 GT bbox 逐个人 crop，然后每个 crop 单独跑 SAM3D。
+        这样不依赖 SAM3D 自己检测多人。
+        """
+        os.makedirs(save_dir, exist_ok=True)
+
+        img = cv2.imread(image_path)
+        if img is None:
+            raise ValueError(f"❌ 无法读取图像: {image_path}")
+
+        H, W = img.shape[:2]
+
+        faces = _to_numpy(reconstructor.estimator.faces)
+        pred_results = []
+
+        for ann_idx, ann in enumerate(person_annotations):
+            bbox = ann.get("bbox", None)
+
+            if bbox is not None:
+                x, y, w, h = bbox
+                x1, y1, x2, y2 = x, y, x + w, y + h
+            else:
+                box = _bbox_from_kpts(ann["ori_kpts"])
+                if box is None:
+                    print(f"⚠️ ann {ann_idx}: no bbox, skip")
+                    continue
+                x1, y1, x2, y2 = box
+
+            bw = x2 - x1
+            bh = y2 - y1
+            pad = pad_ratio * max(bw, bh)
+
+            x1p = int(max(0, x1 - pad))
+            y1p = int(max(0, y1 - pad))
+            x2p = int(min(W, x2 + pad))
+            y2p = int(min(H, y2 + pad))
+
+            if x2p <= x1p or y2p <= y1p:
+                print(f"⚠️ ann {ann_idx}: invalid crop, skip")
+                continue
+
+            crop = img[y1p:y2p, x1p:x2p].copy()
+            crop_path = os.path.join(save_dir, f"person_crop_{ann_idx:02d}.jpg")
+            cv2.imwrite(crop_path, crop)
+
+            outputs = reconstructor.estimator.process_one_image(crop_path)
+
+            if outputs is None or len(outputs) == 0:
+                print(f"⚠️ ann {ann_idx}: SAM3D failed on crop")
+                continue
+
+            # crop 里通常只应该有一个人，所以取第一个
+            person_data = outputs[0]
+
+            cam_t = _to_numpy(person_data.get("pred_cam_t"))
+            if cam_t is not None:
+                cam_t = np.asarray(cam_t).reshape(-1)[:3]
+
+            vertices = _to_numpy(person_data["pred_vertices"])
+            vertices = np.squeeze(vertices)
+
+            if cam_t is not None:
+                vertices = vertices + cam_t
+
+            mesh = trimesh.Trimesh(vertices, faces, process=False)
+
+            mesh_path = os.path.join(save_dir, f"whole_body_mesh_person_{ann_idx:02d}.obj")
+            mesh.export(mesh_path)
+
+            crop_h, crop_w = crop.shape[:2]
+            focal_length = float(person_data["focal_length"])
+
+            # 重点：SAM3D 是在 crop 坐标系预测的。
+            # 投影回整张图时，需要把 principal point 加上 crop offset。
+            pred_cam = {
+                "focal": np.array([focal_length, focal_length]),
+                "princpt": np.array([
+                    x1p + crop_w / 2.0,
+                    y1p + crop_h / 2.0,
+                ]),
+                "cam_t": cam_t,
+            }
+
+            joints_3d = _to_numpy(person_data.get("pred_keypoints_3d"))
+            pred_joints_dict = {}
+
+            if joints_3d is not None:
+                joints_3d = np.squeeze(joints_3d)
+                if cam_t is not None:
+                    joints_3d = joints_3d + cam_t
+                pred_joints_dict = _build_pred_joints_dict(joints_3d)
+
+            pred_bbox = np.array([x1p, y1p, x2p, y2p], dtype=np.float32)
+
+            pred_results.append({
+                "person_idx": ann_idx,
+                "ann_idx": ann_idx,
+                "mesh_path": mesh_path,
+                "mesh": mesh,
+                "whole_mesh": mesh.copy(),
+                "pred_joints_3d": pred_joints_dict,
+                "pred_cam": pred_cam,
+                "pred_bbox": pred_bbox,
+                "crop_path": crop_path,
+                "crop_offset": np.array([x1p, y1p], dtype=np.float32),
+                "raw_output": person_data,
+            })
+
+        print(f">>> SAM3D crop-based persons: {len(pred_results)}")
+        return pred_results
+
     def _match_annotations_to_predictions(person_annotations, pred_results):
         """
         GT person 和 SAM3D person 做 bbox matching。
@@ -1864,23 +1976,21 @@ def main(ori_image_path, gen_image_path, reconstructor, annotation_file, gt_3d_k
     # ============================================================
     # 5. SAM3D 多人 mesh prediction
     # ============================================================
-    try:
-        pred_results = _predict_mesh_all_from_estimator(
-            image_path=ori_image_path,
-            save_dir=dir_name,
-        )
-    except Exception as e:
-        print(f"❌ SAM3D prediction failed: {e}")
-        return 0, 0, 0, None, None, None
+    pred_results = _predict_mesh_from_gt_crops(
+        image_path=ori_image_path,
+        person_annotations=person_annotations,
+        save_dir=dir_name,
+    )
 
-    # ============================================================
-    # 6. 匹配 GT person 和 SAM3D person
-    # ============================================================
-    matched_pairs = _match_annotations_to_predictions(person_annotations, pred_results)
+    matched_pairs = []
 
-    print(">>> matched GT/SAM3D persons:")
+    for pred_idx, pred in enumerate(pred_results):
+        ann_idx = pred["ann_idx"]
+        matched_pairs.append((ann_idx, pred_idx, 1.0))
+
+    print(">>> crop-based GT/SAM3D persons:")
     for ann_idx, pred_idx, score in matched_pairs:
-        print(f"    GT ann {ann_idx} -> SAM3D person {pred_idx}, IoU={score:.4f}")
+        print(f"    GT ann {ann_idx} -> SAM3D crop person {pred_idx}, score={score:.4f}")
 
     if len(matched_pairs) == 0:
         print("❌ No matched person.")
