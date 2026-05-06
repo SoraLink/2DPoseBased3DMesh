@@ -1,6 +1,7 @@
 import json
 import os
 import re
+import traceback
 from pathlib import Path
 import matplotlib.pyplot as plt
 
@@ -1456,7 +1457,13 @@ def project_multi_mesh_overlay(image_path, gen_image_path, mesh_cam_items, outpu
 
         for item_idx, item in enumerate(mesh_cam_items):
             mesh = item["mesh"]
-            cam = item["cam"]
+
+            cam = item.get("pred_cam", item.get("cam", None))
+            if cam is None:
+                raise KeyError(
+                    f"mesh_cam_items[{item_idx}] has no 'pred_cam' or 'cam'. "
+                    f"Available keys: {list(item.keys())}"
+                )
 
             f = cam["focal"]
             c = cam["princpt"]
@@ -2192,7 +2199,7 @@ def main(ori_image_path, gen_image_path, reconstructor, annotation_file, gt_3d_k
 
             all_cut_mesh_cam_items.append({
                 "mesh": mesh,
-                "cam": global_cam,
+                "pred_cam": global_cam,
                 "person_idx": pred_idx,
             })
 
@@ -2220,7 +2227,7 @@ def main(ori_image_path, gen_image_path, reconstructor, annotation_file, gt_3d_k
 
         all_cut_mesh_cam_items.append({
             "mesh": cut_mesh,
-            "cam": global_cam,
+            "pred_cam": global_cam,
             "person_idx": pred_idx,
         })
 
