@@ -107,8 +107,8 @@ def process_image(processor, image_path: Path, out_dir: Path, device: str, keep_
     print(f"处理完成: {image_path.name} -> {save_path.name}")
 
 if __name__ == "__main__":
-    image_dir = Path("./3D_data/images")
-    output_dir = Path("./3D_data/images_seg")
+    image_dir = Path("./eval")
+    output_dir = Path("./eval")
     output_dir.mkdir(parents=True, exist_ok=True)  # 确保输出目录存在
 
     device = "cuda" if torch.cuda.is_available() else "cpu"

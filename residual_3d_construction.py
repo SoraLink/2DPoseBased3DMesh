@@ -2177,9 +2177,9 @@ def main(ori_image_path, gen_image_path, reconstructor, annotation_file, gt_3d_k
 
 if __name__ == "__main__":
     reconstructor = ReconstructionEngine()
-    workdir = Path('./workdir1')
+    workdir = Path('./workdir11')
 
-    ann2d_path = "./data/filtered_annotations.json"
+    ann2d_path = "./data/train_final.json"
     # ann3d_path = "./3D_data/annotations_3d_propose.json"
 
     # image_to_gt3d = load_2d_image_to_gt3d_map(ann2d_path)
@@ -2200,14 +2200,14 @@ if __name__ == "__main__":
     for dir_path in dirs:
         image_folder = Path(dir_path)
 
-        all_files = [str(p) for p in image_folder.iterdir() if p.is_file() and p.name.startswith('compositing')]
+        all_files = [str(p) for p in image_folder.iterdir() if p.is_file()]
 
         if not all_files:
             continue
 
         all_files.sort()
         gen_image_path = all_files[-1]
-        ori_image_path = f'./data/eval/{dir_path.name}.jpg'
+        ori_image_path = f'./eval/{dir_path.name}.jpg'
         print(f'start to analyse image {gen_image_path}')
         # gt_3d_kpts = get_gt_3d_for_sample_from_merged(
         #     sample_name=dir_path.name,
