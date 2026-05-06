@@ -2121,11 +2121,6 @@ def main(ori_image_path, gen_image_path, reconstructor, annotation_file, gt_3d_k
         pred_cam = pred["pred_cam"]
 
         all_whole_meshes.append(whole_mesh)
-        all_whole_mesh_cam_items.append({
-            "mesh": whole_mesh,
-            "pred_cam": global_cam,
-            "person_idx": pred_idx,
-        })
 
         global_focal = pred_cam["focal"]
         global_cx = pred_cam["princpt"][0]
@@ -2135,6 +2130,11 @@ def main(ori_image_path, gen_image_path, reconstructor, annotation_file, gt_3d_k
             "focal": global_focal,
             "princpt": np.array([global_cx, global_cy]),
         }
+        all_whole_mesh_cam_items.append({
+            "mesh": whole_mesh,
+            "pred_cam": global_cam,
+            "person_idx": pred_idx,
+        })
 
         vis_save_path = os.path.join(
             dir_name,
