@@ -146,6 +146,62 @@ def read_kpts_annotation(image_path, annotation_path):
                     filtered_kpts[i, 2] = 0.0
             return filtered_kpts, ori_kpts, types
 
+def read_all_kpts_annotations(image_path, annotation_path):
+    with open(annotation_path, 'r') as f:
+        coco_data = json.load(f)
+
+    image_id = None
+    image_name = os.path.basename(image_path)
+
+    for img_info in coco_data['images']:
+        if img_info['file_name'] == image_name:
+            image_id = img_info['id']
+            break
+
+    if image_id is None:
+        raise ValueError(f"在 COCO 文件中找不到图片名: {image_name}")
+
+    person_annotations = []
+
+    for ann in coco_data['annotations']:
+        if ann['image_id'] != image_id:
+            continue
+
+        kpts = ann['keypoints']
+        types = ann['keypoint_types']
+
+        ori_kpts = np.zeros((31, 3), dtype=np.float32)
+        filtered_kpts = np.zeros((31, 3), dtype=np.float32)
+
+        for i, kpt_type in enumerate(types):
+            x = kpts[i * 3]
+            y = kpts[i * 3 + 1]
+            v = kpts[i * 3 + 2]
+
+            ori_kpts[i] = [x, y, v]
+
+            filtered_kpts[i, :2] = [x, y]
+            filtered_kpts[i, 2] = v
+
+            # 非正常身体点，例如 prosthetic / absent，过滤掉 visibility
+            if kpt_type != 0:
+                filtered_kpts[i, 2] = 0.0
+
+        person_annotations.append({
+            "ann_id": ann.get("id", None),
+            "image_id": image_id,
+            "filtered_kpts": filtered_kpts,
+            "ori_kpts": ori_kpts,
+            "types": np.asarray(types, dtype=np.int32),
+            "bbox": ann.get("bbox", None),
+            "area": ann.get("area", None),
+        })
+
+    if len(person_annotations) == 0:
+        raise ValueError(f"图片 {image_name} 没有找到任何 person annotation")
+
+    return person_annotations
+
 
 if __name__ == "__main__":
     extractor = PoseExtractor("./configs/ldpose.py", "./checkpoints/ldpose.pth")

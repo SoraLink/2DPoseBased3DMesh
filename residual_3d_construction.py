@@ -1343,21 +1343,436 @@ def load_gt_mask(image_path):
 
     return mask
 
-def main(ori_image_path, gen_image_path, reconstructor, annotation_file, gt_3d_kpts=None):
-    kpts_orig, kpts, types_orig = read_kpts_annotation(ori_image_path, annotation_file)
+def bbox_from_kpts(kpts, conf_thr=0.0):
+    """
+    kpts: (31, 3), x y conf
+    返回 [x1, y1, x2, y2]
+    """
+    pts = []
 
-    for i in range(len(kpts_orig)):
-        kpts_orig[i][0] /= 3.0  # x 坐标缩小
-        kpts_orig[i][1] /= 3.0  # y 坐标缩小
+    for p in kpts:
+        x, y, c = p[:3]
+        if c > conf_thr and np.isfinite(x) and np.isfinite(y):
+            pts.append([x, y])
+
+    if len(pts) == 0:
+        return None
+
+    pts = np.asarray(pts, dtype=np.float32)
+    x1, y1 = pts.min(axis=0)
+    x2, y2 = pts.max(axis=0)
+    return np.array([x1, y1, x2, y2], dtype=np.float32)
+
+
+def bbox_iou(box_a, box_b):
+    if box_a is None or box_b is None:
+        return 0.0
+
+    ax1, ay1, ax2, ay2 = box_a
+    bx1, by1, bx2, by2 = box_b
+
+    ix1 = max(ax1, bx1)
+    iy1 = max(ay1, by1)
+    ix2 = min(ax2, bx2)
+    iy2 = min(ay2, by2)
+
+    iw = max(0.0, ix2 - ix1)
+    ih = max(0.0, iy2 - iy1)
+    inter = iw * ih
+
+    area_a = max(0.0, ax2 - ax1) * max(0.0, ay2 - ay1)
+    area_b = max(0.0, bx2 - bx1) * max(0.0, by2 - by1)
+
+    union = area_a + area_b - inter
+    if union <= 1e-6:
+        return 0.0
+
+    return inter / union
+
+
+def match_annotations_to_predictions(person_annotations, pred_results):
+    """
+    person_annotations:
+        [
+            {"kpts_orig": ..., "kpts": ..., "types_orig": ..., "gt_3d_kpts": ...},
+            ...
+        ]
+
+    pred_results:
+        predict_mesh_all() 返回的 list
+
+    返回:
+        [(ann_idx, pred_idx), ...]
+    """
+    pairs = []
+
+    used_preds = set()
+
+    for ann_idx, ann in enumerate(person_annotations):
+        gt_box = bbox_from_kpts(ann["kpts_orig"])
+
+        best_pred_idx = None
+        best_score = -1.0
+
+        for pred_idx, pred in enumerate(pred_results):
+            if pred_idx in used_preds:
+                continue
+
+            score = bbox_iou(gt_box, pred.get("pred_bbox"))
+
+            if score > best_score:
+                best_score = score
+                best_pred_idx = pred_idx
+
+        if best_pred_idx is not None:
+            used_preds.add(best_pred_idx)
+            pairs.append((ann_idx, best_pred_idx))
+
+    return pairs
+
+def main(ori_image_path, gen_image_path, reconstructor, annotation_file, gt_3d_kpts=None):
+    """
+    Multi-person version.
+
+    支持一张图里多个被标注的人：
+    1. 读取该 image_id 下所有 person annotations
+    2. 直接调用 SAM3D estimator.process_one_image 得到多个 person mesh
+    3. 用 bbox IoU 将 GT person 和 SAM3D person 匹配
+    4. 每个人单独 process_multiple_cuts
+    5. 最后 concatenate 所有 cut mesh
+    """
 
     # ============================================================
-    # 1. 提取真实的 GT Mask (基于原图 Alpha 通道或灰度图) 算 mIoU 用
+    # Local helper functions
+    # ============================================================
+    def _to_numpy(x):
+        if x is None:
+            return None
+        if hasattr(x, "detach"):
+            x = x.detach().cpu().numpy()
+        return np.asarray(x)
+
+    def _safe_mean(xs, default=0):
+        xs = [x for x in xs if x is not None]
+        return float(np.mean(xs)) if len(xs) > 0 else default
+
+    def _bbox_iou(box_a, box_b):
+        if box_a is None or box_b is None:
+            return 0.0
+
+        ax1, ay1, ax2, ay2 = box_a
+        bx1, by1, bx2, by2 = box_b
+
+        ix1 = max(ax1, bx1)
+        iy1 = max(ay1, by1)
+        ix2 = min(ax2, bx2)
+        iy2 = min(ay2, by2)
+
+        iw = max(0.0, ix2 - ix1)
+        ih = max(0.0, iy2 - iy1)
+        inter = iw * ih
+
+        area_a = max(0.0, ax2 - ax1) * max(0.0, ay2 - ay1)
+        area_b = max(0.0, bx2 - bx1) * max(0.0, by2 - by1)
+        union = area_a + area_b - inter
+
+        if union <= 1e-6:
+            return 0.0
+
+        return float(inter / union)
+
+    def _bbox_from_kpts(kpts, conf_thr=0.0):
+        pts = []
+
+        for p in kpts:
+            x, y, v = p[:3]
+            if v > conf_thr and np.isfinite(x) and np.isfinite(y):
+                pts.append([x, y])
+
+        if len(pts) == 0:
+            return None
+
+        pts = np.asarray(pts, dtype=np.float32)
+        x1, y1 = pts.min(axis=0)
+        x2, y2 = pts.max(axis=0)
+
+        return np.array([x1, y1, x2, y2], dtype=np.float32)
+
+    def _xywh_to_xyxy(bbox):
+        if bbox is None:
+            return None
+        x, y, w, h = bbox
+        return np.array([x, y, x + w, y + h], dtype=np.float32)
+
+    def _build_pred_joints_dict(joints_3d):
+        """
+        保持你原来的 SAM3D MHR70 -> semantic name 映射。
+        """
+        return {
+            "nose": joints_3d[0],
+            "left_eye": joints_3d[1],
+            "right_eye": joints_3d[2],
+            "left_ear": joints_3d[3],
+            "right_ear": joints_3d[4],
+
+            "left_shoulder": joints_3d[5],
+            "right_shoulder": joints_3d[6],
+            "left_elbow": joints_3d[7],
+            "right_elbow": joints_3d[8],
+            "left_wrist": joints_3d[62],
+            "right_wrist": joints_3d[41],
+
+            "left_hip": joints_3d[9],
+            "right_hip": joints_3d[10],
+            "left_knee": joints_3d[11],
+            "right_knee": joints_3d[12],
+            "left_ankle": joints_3d[13],
+            "right_ankle": joints_3d[14],
+
+            "L_Middle_Tip": joints_3d[50],
+            "R_Middle_Tip": joints_3d[29],
+            "L_Heel": joints_3d[17],
+            "R_Heel": joints_3d[20],
+            "L_Toe_Tip": joints_3d[15],
+            "R_Toe_Tip": joints_3d[18],
+
+            "pelvis": (joints_3d[9] + joints_3d[10]) / 2.0,
+            "neck": (joints_3d[5] + joints_3d[6]) / 2.0,
+        }
+
+    def _project_bbox_from_joints(pred_joints_3d, pred_cam):
+        focal = pred_cam["focal"]
+        princpt = pred_cam["princpt"]
+
+        pts = []
+        for name in [
+            "nose",
+            "left_shoulder", "right_shoulder",
+            "left_elbow", "right_elbow",
+            "left_hip", "right_hip",
+            "left_knee", "right_knee",
+            "left_ankle", "right_ankle",
+        ]:
+            if name not in pred_joints_3d:
+                continue
+
+            p = pred_joints_3d[name]
+            if p[2] <= 1e-5:
+                continue
+
+            x = focal[0] * (p[0] / p[2]) + princpt[0]
+            y = focal[1] * (p[1] / p[2]) + princpt[1]
+            pts.append([x, y])
+
+        if len(pts) == 0:
+            return None
+
+        pts = np.asarray(pts, dtype=np.float32)
+        x1, y1 = pts.min(axis=0)
+        x2, y2 = pts.max(axis=0)
+
+        return np.array([x1, y1, x2, y2], dtype=np.float32)
+
+    def _read_all_person_annotations(image_path, annotation_path):
+        """
+        读取当前图片下所有 person annotations。
+        返回 list，每个元素是一套 keypoints/types。
+        """
+        with open(annotation_path, "r", encoding="utf-8") as f:
+            coco_data = json.load(f)
+
+        image_name = os.path.basename(image_path)
+
+        image_id = None
+        for img_info in coco_data["images"]:
+            if img_info["file_name"] == image_name:
+                image_id = img_info["id"]
+                break
+
+        if image_id is None:
+            raise ValueError(f"在 COCO 文件中找不到图片名: {image_name}")
+
+        person_annotations = []
+
+        for ann in coco_data["annotations"]:
+            if ann.get("image_id") != image_id:
+                continue
+
+            kpts = ann["keypoints"]
+            types = ann["keypoint_types"]
+
+            ori_kpts = np.zeros((31, 3), dtype=np.float32)
+            filtered_kpts = np.zeros((31, 3), dtype=np.float32)
+
+            for i, kpt_type in enumerate(types):
+                x = kpts[i * 3]
+                y = kpts[i * 3 + 1]
+                v = kpts[i * 3 + 2]
+
+                ori_kpts[i] = [x, y, v]
+
+                filtered_kpts[i, :2] = [x, y]
+                filtered_kpts[i, 2] = v
+
+                if kpt_type != 0:
+                    filtered_kpts[i, 2] = 0.0
+
+            person_annotations.append({
+                "ann_id": ann.get("id", None),
+                "image_id": image_id,
+                "filtered_kpts": filtered_kpts,
+                "ori_kpts": ori_kpts,
+                "types": np.asarray(types, dtype=np.int32),
+                "bbox": ann.get("bbox", None),
+                "area": ann.get("area", None),
+            })
+
+        if len(person_annotations) == 0:
+            raise ValueError(f"图片 {image_name} 没有找到任何 person annotation")
+
+        return person_annotations
+
+    def _predict_mesh_all_from_estimator(image_path, save_dir):
+        """
+        不要求你修改 ReconstructionEngine。
+        这里直接用 reconstructor.estimator.process_one_image 取所有人。
+        """
+        os.makedirs(save_dir, exist_ok=True)
+
+        img_cv2 = cv2.imread(image_path)
+        if img_cv2 is None:
+            raise ValueError(f"❌ 无法读取图像: {image_path}")
+
+        h, w = img_cv2.shape[:2]
+
+        outputs = reconstructor.estimator.process_one_image(image_path)
+        if outputs is None or len(outputs) == 0:
+            raise ValueError("❌ SAM3D 未检测到人物。")
+
+        faces = _to_numpy(reconstructor.estimator.faces)
+
+        pred_results = []
+
+        print(f">>> SAM3D detected persons: {len(outputs)}")
+
+        for person_idx, person_data in enumerate(outputs):
+            cam_t = _to_numpy(person_data.get("pred_cam_t"))
+            if cam_t is not None:
+                cam_t = np.asarray(cam_t).reshape(-1)[:3]
+
+            vertices = _to_numpy(person_data["pred_vertices"])
+            vertices = np.squeeze(vertices)
+
+            if cam_t is not None:
+                vertices = vertices + cam_t
+
+            mesh = trimesh.Trimesh(vertices, faces, process=False)
+
+            mesh_path = os.path.join(save_dir, f"whole_body_mesh_person_{person_idx:02d}.obj")
+            mesh.export(mesh_path)
+
+            focal_length = float(person_data["focal_length"])
+            pred_cam = {
+                "focal": np.array([focal_length, focal_length]),
+                "princpt": np.array([w / 2.0, h / 2.0]),
+                "cam_t": cam_t,
+            }
+
+            joints_3d = _to_numpy(person_data.get("pred_keypoints_3d"))
+            pred_joints_dict = {}
+
+            if joints_3d is not None:
+                joints_3d = np.squeeze(joints_3d)
+                if cam_t is not None:
+                    joints_3d = joints_3d + cam_t
+
+                pred_joints_dict = _build_pred_joints_dict(joints_3d)
+
+            pred_bbox = _project_bbox_from_joints(pred_joints_dict, pred_cam)
+
+            pred_results.append({
+                "person_idx": person_idx,
+                "mesh_path": mesh_path,
+                "mesh": mesh,
+                "whole_mesh": mesh.copy(),
+                "pred_joints_3d": pred_joints_dict,
+                "pred_cam": pred_cam,
+                "pred_bbox": pred_bbox,
+                "raw_output": person_data,
+            })
+
+        return pred_results
+
+    def _match_annotations_to_predictions(person_annotations, pred_results):
+        """
+        GT person 和 SAM3D person 做 bbox matching。
+        优先使用 COCO bbox；没有 bbox 就用 keypoints bbox。
+        """
+        pairs = []
+        used_pred_indices = set()
+
+        for ann_idx, ann in enumerate(person_annotations):
+            gt_box = _xywh_to_xyxy(ann.get("bbox"))
+
+            if gt_box is None:
+                gt_box = _bbox_from_kpts(ann["ori_kpts"])
+
+            best_pred_idx = None
+            best_score = -1.0
+
+            for pred_idx, pred in enumerate(pred_results):
+                if pred_idx in used_pred_indices:
+                    continue
+
+                score = _bbox_iou(gt_box, pred.get("pred_bbox"))
+
+                if score > best_score:
+                    best_score = score
+                    best_pred_idx = pred_idx
+
+            if best_pred_idx is not None:
+                used_pred_indices.add(best_pred_idx)
+                pairs.append((ann_idx, best_pred_idx, best_score))
+
+        return pairs
+
+    def _get_gt3d_for_person(gt_3d_kpts, ann_idx, num_persons):
+        """
+        兼容旧代码：
+        - 如果 gt_3d_kpts=None，跳过 3D
+        - 如果只有一个 person，沿用原来的 gt_3d_kpts
+        - 如果是 list，则按 ann_idx 取
+        - 多人但只传了单个 dict，避免错配，直接跳过 3D
+        """
+        if gt_3d_kpts is None:
+            return None
+
+        if isinstance(gt_3d_kpts, list):
+            if ann_idx < len(gt_3d_kpts):
+                return gt_3d_kpts[ann_idx]
+            return None
+
+        if num_persons == 1:
+            return gt_3d_kpts
+
+        return None
+
+    # ============================================================
+    # 0. 读取当前图所有 GT person annotations
+    # 注意：这里先读原始图片名。后面 ori_image_path 会被改成 white_resized。
+    # ============================================================
+    person_annotations = _read_all_person_annotations(ori_image_path, annotation_file)
+    print(f">>> GT annotated persons: {len(person_annotations)}")
+
+    # ============================================================
+    # 1. 提取真实 GT Mask
     # ============================================================
     img_ori_raw = cv2.imread(ori_image_path, cv2.IMREAD_UNCHANGED)
     if img_ori_raw is None:
         return 0, 0, 0, None, None, None
 
-    target_h, target_w = int(img_ori_raw.shape[0] / 3), int(img_ori_raw.shape[1] / 3)
+    target_h = int(img_ori_raw.shape[0] / 3)
+    target_w = int(img_ori_raw.shape[1] / 3)
 
     if len(img_ori_raw.shape) == 3 and img_ori_raw.shape[2] == 4:
         alpha_channel = img_ori_raw[:, :, 3]
@@ -1366,177 +1781,399 @@ def main(ori_image_path, gen_image_path, reconstructor, annotation_file, gt_3d_k
         gray = cv2.cvtColor(img_ori_raw, cv2.COLOR_BGR2GRAY)
         _, raw_mask = cv2.threshold(gray, 0, 255, cv2.THRESH_BINARY)
 
-    mask_gt_resized = cv2.resize(raw_mask, (target_w, target_h), interpolation=cv2.INTER_NEAREST)
+    mask_gt_resized = cv2.resize(
+        raw_mask,
+        (target_w, target_h),
+        interpolation=cv2.INTER_NEAREST,
+    )
 
     # ============================================================
-    # 2. 制作白底的原图 (Ori)
+    # 2. 制作白底原图 Ori
     # ============================================================
     if len(img_ori_raw.shape) == 3 and img_ori_raw.shape[2] == 4:
         alpha_norm = img_ori_raw[:, :, 3] / 255.0
         white_bg = np.ones_like(img_ori_raw[:, :, :3]) * 255
-        img_ori_white = (img_ori_raw[:, :, :3] * alpha_norm[:, :, np.newaxis] +
-                         white_bg * (1 - alpha_norm[:, :, np.newaxis])).astype(np.uint8)
+        img_ori_white = (
+            img_ori_raw[:, :, :3] * alpha_norm[:, :, np.newaxis]
+            + white_bg * (1 - alpha_norm[:, :, np.newaxis])
+        ).astype(np.uint8)
     else:
-        img_ori_white = cv2.cvtColor(img_ori_raw, cv2.COLOR_GRAY2BGR) if len(img_ori_raw.shape) == 2 else img_ori_raw[
-            :, :, :3]
+        if len(img_ori_raw.shape) == 2:
+            img_ori_white = cv2.cvtColor(img_ori_raw, cv2.COLOR_GRAY2BGR)
+        else:
+            img_ori_white = img_ori_raw[:, :, :3]
 
-    image_ori_resized = cv2.resize(img_ori_white, (target_w, target_h), interpolation=cv2.INTER_AREA)
+    image_ori_resized = cv2.resize(
+        img_ori_white,
+        (target_w, target_h),
+        interpolation=cv2.INTER_AREA,
+    )
+
     base_name_ori, _ = os.path.splitext(ori_image_path)
     temp_ori_path = f"{base_name_ori}_white_resized.jpg"
     cv2.imwrite(temp_ori_path, image_ori_resized)
     ori_image_path = temp_ori_path
 
     # ============================================================
-    # 3. 🌟 新增：制作白底的生成图 (Gen)
+    # 3. 制作白底生成图 Gen
     # ============================================================
     img_gen_raw = cv2.imread(gen_image_path, cv2.IMREAD_UNCHANGED)
-    if img_gen_raw is not None and len(img_gen_raw.shape) == 3 and img_gen_raw.shape[2] == 4:
-        alpha_norm_gen = img_gen_raw[:, :, 3] / 255.0
-        white_bg_gen = np.ones_like(img_gen_raw[:, :, :3]) * 255
-        img_gen_white = (img_gen_raw[:, :, :3] * alpha_norm_gen[:, :, np.newaxis] +
-                         white_bg_gen * (1 - alpha_norm_gen[:, :, np.newaxis])).astype(np.uint8)
-    elif img_gen_raw is not None:
-        img_gen_white = cv2.cvtColor(img_gen_raw, cv2.COLOR_GRAY2BGR) if len(img_gen_raw.shape) == 2 else img_gen_raw[
-            :, :, :3]
-    else:
-        # 兜底
-        img_gen_white = np.ones((target_h, target_w, 3), dtype=np.uint8) * 255
 
-    img_gen_resized = cv2.resize(img_gen_white, (target_w, target_h), interpolation=cv2.INTER_AREA)
-    base_name_gen, _ = os.path.splitext(gen_image_path)
-    temp_gen_path = f"{base_name_gen}_white_resized.jpg"  # 强制存为 JPG 抹除透明度
-    cv2.imwrite(temp_gen_path, img_gen_resized)
-
-    # ============================================================
-    # 4. 模型推理与后续逻辑
-    # ============================================================
-    dir_name = os.path.dirname(temp_gen_path)
-    mesh_save_path = os.path.join(dir_name, "whole_body_mesh.obj")
-
-    try:
-        mesh_save_path, pred_joints_3d, pred_cam, mesh = reconstructor.predict_mesh(
-            ori_image_path, mesh_save_path)
-    except SystemExit as e:
-        print(e)
+    if img_gen_raw is None:
         return 0, 0, 0, None, None, None
 
-    whole_mesh = mesh.copy()
-    global_focal = pred_cam['focal']
-    global_cx = pred_cam['princpt'][0]
-    global_cy = pred_cam['princpt'][1]
-    global_cam = {
-        'focal': global_focal,
-        'princpt': np.array([global_cx, global_cy])
+    if len(img_gen_raw.shape) == 3 and img_gen_raw.shape[2] == 4:
+        alpha_norm_gen = img_gen_raw[:, :, 3] / 255.0
+        white_bg_gen = np.ones_like(img_gen_raw[:, :, :3]) * 255
+        img_gen_white = (
+            img_gen_raw[:, :, :3] * alpha_norm_gen[:, :, np.newaxis]
+            + white_bg_gen * (1 - alpha_norm_gen[:, :, np.newaxis])
+        ).astype(np.uint8)
+    else:
+        if len(img_gen_raw.shape) == 2:
+            img_gen_white = cv2.cvtColor(img_gen_raw, cv2.COLOR_GRAY2BGR)
+        else:
+            img_gen_white = img_gen_raw[:, :, :3]
+
+    image_gen_resized = cv2.resize(
+        img_gen_white,
+        (target_w, target_h),
+        interpolation=cv2.INTER_AREA,
+    )
+
+    base_name_gen, _ = os.path.splitext(gen_image_path)
+    temp_gen_path = f"{base_name_gen}_white_resized.jpg"
+    cv2.imwrite(temp_gen_path, image_gen_resized)
+
+    dir_name = os.path.dirname(temp_gen_path)
+
+    # ============================================================
+    # 4. annotation 坐标同步缩小 3 倍
+    # ============================================================
+    for ann in person_annotations:
+        ann["ori_kpts"][:, 0] /= 3.0
+        ann["ori_kpts"][:, 1] /= 3.0
+
+        ann["filtered_kpts"][:, 0] /= 3.0
+        ann["filtered_kpts"][:, 1] /= 3.0
+
+        if ann.get("bbox") is not None:
+            x, y, w, h = ann["bbox"]
+            ann["bbox"] = [x / 3.0, y / 3.0, w / 3.0, h / 3.0]
+
+    # ============================================================
+    # 5. SAM3D 多人 mesh prediction
+    # ============================================================
+    try:
+        pred_results = _predict_mesh_all_from_estimator(
+            image_path=ori_image_path,
+            save_dir=dir_name,
+        )
+    except Exception as e:
+        print(f"❌ SAM3D prediction failed: {e}")
+        return 0, 0, 0, None, None, None
+
+    # ============================================================
+    # 6. 匹配 GT person 和 SAM3D person
+    # ============================================================
+    matched_pairs = _match_annotations_to_predictions(person_annotations, pred_results)
+
+    print(">>> matched GT/SAM3D persons:")
+    for ann_idx, pred_idx, score in matched_pairs:
+        print(f"    GT ann {ann_idx} -> SAM3D person {pred_idx}, IoU={score:.4f}")
+
+    if len(matched_pairs) == 0:
+        print("❌ No matched person.")
+        return 0, 0, 0, None, None, None
+
+    # ============================================================
+    # 7. 对每个人单独截肢
+    # ============================================================
+    all_whole_meshes = []
+    all_cut_meshes = []
+
+    miou_scores = []
+    mpjpe_intact_scores = []
+    mpjpe_residual_scores = []
+    aa_mpjpe_scores = []
+    aa_r_mpjpe_scores = []
+    aa_pa_mpjpe_scores = []
+
+    INTACT_MAPPING = {
+        METAINFO["keypoint_info"][i]["name"]: i
+        for i in range(0, 17)
     }
 
-    # 绘制可视化对比图 (现在原图和生成图都是干净的白底了)
-    vis_save_path = os.path.join(dir_name, "keypoints_comparison.jpg")
-    visualize_keypoints_comparison(ori_image_path, pred_joints_3d, global_cam, vis_save_path)
-    project_mesh_overlay(ori_image_path, temp_gen_path, mesh, global_cam, dir_name)
-    cut_tasks = []
-    for i in range(23, 31):
-        if types_orig[i] == 0:
-            res_name = METAINFO['keypoint_info'][i]['name']
+    RES_MAPPING = {
+        METAINFO["keypoint_info"][i]["name"]: i
+        for i in range(23, 31)
+    }
+
+    for ann_idx, pred_idx, match_score in matched_pairs:
+        ann = person_annotations[ann_idx]
+        pred = pred_results[pred_idx]
+
+        kpts_orig = ann["ori_kpts"]
+        types_orig = ann["types"]
+
+        mesh_save_path = pred["mesh_path"]
+        mesh = pred["mesh"]
+        whole_mesh = pred["whole_mesh"]
+        pred_joints_3d = pred["pred_joints_3d"]
+        pred_cam = pred["pred_cam"]
+
+        all_whole_meshes.append(whole_mesh)
+
+        global_focal = pred_cam["focal"]
+        global_cx = pred_cam["princpt"][0]
+        global_cy = pred_cam["princpt"][1]
+
+        global_cam = {
+            "focal": global_focal,
+            "princpt": np.array([global_cx, global_cy]),
+        }
+
+        vis_save_path = os.path.join(
+            dir_name,
+            f"keypoints_comparison_person_{pred_idx:02d}.jpg",
+        )
+        visualize_keypoints_comparison(
+            ori_image_path,
+            pred_joints_3d,
+            global_cam,
+            vis_save_path,
+        )
+
+        # --------------------------------------------------------
+        # 当前 person 的 cut_tasks
+        # --------------------------------------------------------
+        cut_tasks = []
+
+        for i in range(23, 31):
+            if i >= len(types_orig):
+                continue
+
+            # type == 0 表示当前残肢点存在 / 需要作为有效点处理
+            if types_orig[i] != 0:
+                continue
+
+            res_name = METAINFO["keypoint_info"][i]["name"]
             pt_2d_orig = kpts_orig[i][0:2]
             pt_2d_orig_homo = np.array([pt_2d_orig[0], pt_2d_orig[1]])
-            if res_name in RES_BONE_MAPPING:
-                start_joint_name, end_joint_name = RES_BONE_MAPPING[res_name]
-                start_3d = pred_joints_3d[start_joint_name]
-                end_3d = pred_joints_3d[end_joint_name]
 
-                cut_tasks.append({
-                    'name': res_name,
-                    'pt_2d': pt_2d_orig_homo,
-                    'start_3d': start_3d,
-                    'end_3d': end_3d
-                })
+            if res_name not in RES_BONE_MAPPING:
+                continue
 
-    if cut_tasks:
-        global_focal = pred_cam['focal']
-        global_cx = pred_cam['princpt'][0]
-        global_cy = pred_cam['princpt'][1]
+            start_joint_name, end_joint_name = RES_BONE_MAPPING[res_name]
 
+            if start_joint_name not in pred_joints_3d or end_joint_name not in pred_joints_3d:
+                print(
+                    f"⚠️ person {pred_idx}: missing joints for {res_name}: "
+                    f"{start_joint_name}, {end_joint_name}"
+                )
+                continue
+
+            start_3d = pred_joints_3d[start_joint_name]
+            end_3d = pred_joints_3d[end_joint_name]
+
+            cut_tasks.append({
+                "name": res_name,
+                "pt_2d": pt_2d_orig_homo,
+                "start_3d": start_3d,
+                "end_3d": end_3d,
+            })
+
+        if not cut_tasks:
+            print(f"⚠️ person {pred_idx}: no cut_tasks, keep whole mesh.")
+            all_cut_meshes.append(mesh)
+            continue
+
+        # --------------------------------------------------------
+        # 单人单独截肢
+        # 不能先合并两个人再 cut，否则 process_multiple_cuts 里的最大连通域清理会删人。
+        # --------------------------------------------------------
         mesh_cutter = ResidualMeshCutter2(
             focal_length=global_focal[0],
-            img_center=(global_cx, global_cy)
+            img_center=(global_cx, global_cy),
         )
-        mesh = mesh_cutter.process_multiple_cuts(
+
+        cut_mesh = mesh_cutter.process_multiple_cuts(
             mesh_path=mesh_save_path,
             cut_tasks=cut_tasks,
         )
+
         for task in cut_tasks:
-            if 'cut_origin' in task:
-                pred_joints_3d[task['name']] = task['cut_origin']
+            if "cut_origin" in task:
+                pred_joints_3d[task["name"]] = task["cut_origin"]
 
-        global_cam = {
-            'focal': global_focal,
-            'princpt': np.array([global_cx, global_cy])
-        }
+        all_cut_meshes.append(cut_mesh)
 
-        orig_proj_path, pred_mask_orig, gen_proj_path, pred_mask_gen = project_mesh_overlay(ori_image_path,
-                                                                                            temp_gen_path, mesh,
-                                                                                            global_cam, dir_name)
+        # --------------------------------------------------------
+        # 单人 2D metric
+        # --------------------------------------------------------
+        orig_proj_path, pred_mask_orig, gen_proj_path, pred_mask_gen = project_mesh_overlay(
+            ori_image_path,
+            temp_gen_path,
+            cut_mesh,
+            global_cam,
+            dir_name,
+        )
 
+        miou_score_person = calculate_miou(pred_mask_orig, mask_gt_resized)
+        mpjpe_intact_person = calculate_2d_mpjpe(
+            pred_joints_3d,
+            kpts_orig,
+            global_cam,
+            INTACT_MAPPING,
+        )
+        mpjpe_residual_person = calculate_2d_mpjpe(
+            pred_joints_3d,
+            kpts_orig,
+            global_cam,
+            RES_MAPPING,
+        )
+
+        miou_scores.append(miou_score_person)
+        mpjpe_intact_scores.append(mpjpe_intact_person)
+        mpjpe_residual_scores.append(mpjpe_residual_person)
+
+        print(f"📊 [person {pred_idx}] mIoU: {miou_score_person:.4f}")
+        print(f"📊 [person {pred_idx}] 完整关节 2D MPJPE: {mpjpe_intact_person:.2f} pixels")
+        print(f"📊 [person {pred_idx}] 残肢端点 2D MPJPE: {mpjpe_residual_person:.2f} pixels")
+
+        # --------------------------------------------------------
+        # 3D metric
+        # 多人时，如果你没有传 list 格式的 gt_3d_kpts，就跳过，避免错配。
+        # --------------------------------------------------------
+        gt_3d_person = _get_gt3d_for_person(
+            gt_3d_kpts,
+            ann_idx,
+            num_persons=len(person_annotations),
+        )
+
+        aa_mpjpe, aa_r_mpjpe, aa_pa_mpjpe = calculate_aa_3d_metrics(
+            pred_joints_3d=pred_joints_3d,
+            gt_3d_kpts=gt_3d_person,
+            kpt_types_orig=types_orig,
+            unit_scale=1000.0,
+        )
+
+        if gt_3d_person is not None:
+            vis_prefix = os.path.join(
+                dir_name,
+                f"aa_metric_vis_person_{pred_idx:02d}",
+            )
+            visualize_aa_alignment(
+                pred_joints_3d=pred_joints_3d,
+                gt_3d_kpts=gt_3d_person,
+                kpt_types_orig=types_orig,
+                save_prefix=vis_prefix,
+            )
+
+        if aa_mpjpe is not None:
+            aa_mpjpe_scores.append(aa_mpjpe)
+            print(f"📊 [person {pred_idx}] AA-MPJPE: {aa_mpjpe:.2f} mm")
+        else:
+            print(f"📊 [person {pred_idx}] AA-MPJPE: skipped")
+
+        if aa_r_mpjpe is not None:
+            aa_r_mpjpe_scores.append(aa_r_mpjpe)
+            print(f"📊 [person {pred_idx}] AA-R-MPJPE: {aa_r_mpjpe:.2f} mm")
+        else:
+            print(f"📊 [person {pred_idx}] AA-R-MPJPE: skipped")
+
+        if aa_pa_mpjpe is not None:
+            aa_pa_mpjpe_scores.append(aa_pa_mpjpe)
+            print(f"📊 [person {pred_idx}] AA-PA-MPJPE: {aa_pa_mpjpe:.2f} mm")
+        else:
+            print(f"📊 [person {pred_idx}] AA-PA-MPJPE: skipped")
+
+    if len(all_cut_meshes) == 0:
+        return 0, 0, 0, None, None, None
+
+    # ============================================================
+    # 8. 合并所有人的 whole mesh / cut mesh
+    # ============================================================
+    merged_cut_mesh = trimesh.util.concatenate(all_cut_meshes)
+    merged_cut_path = os.path.join(dir_name, "cut_mesh_all_persons.obj")
+    merged_cut_mesh.export(merged_cut_path)
+    print(f"✅ merged cut mesh saved: {merged_cut_path}")
+
+    if len(all_whole_meshes) > 0:
+        merged_whole_mesh = trimesh.util.concatenate(all_whole_meshes)
+        merged_whole_path = os.path.join(dir_name, "whole_body_mesh_all_persons.obj")
+        merged_whole_mesh.export(merged_whole_path)
+        print(f"✅ merged whole mesh saved: {merged_whole_path}")
+    else:
+        merged_whole_mesh = None
+
+    # ============================================================
+    # 9. 合并后的整体 projection / mIoU
+    # ============================================================
+    pred_cam0 = pred_results[0]["pred_cam"]
+    global_cam0 = {
+        "focal": pred_cam0["focal"],
+        "princpt": pred_cam0["princpt"],
+    }
+
+    orig_proj_path, pred_mask_orig, gen_proj_path, pred_mask_gen = project_mesh_overlay(
+        ori_image_path,
+        temp_gen_path,
+        merged_cut_mesh,
+        global_cam0,
+        dir_name,
+    )
+
+    merged_miou = calculate_miou(pred_mask_orig, mask_gt_resized)
+    print(f"📊 [merged all persons] mIoU: {merged_miou:.4f}")
+
+    # paper visualization: 尝试保存合并后的可视化
+    try:
         paper_vis_dir = os.path.join(dir_name, "paper_visualizations")
         os.makedirs(paper_vis_dir, exist_ok=True)
 
         paper_paths = reconstructor.render_paper_projections(
             image_path=ori_image_path,
             out_dir=paper_vis_dir,
-            whole_mesh=whole_mesh,
-            cut_mesh=mesh,
-            pred_cam=pred_cam,
+            whole_mesh=merged_whole_mesh,
+            cut_mesh=merged_cut_mesh,
+            pred_cam=pred_cam0,
         )
 
         print("Whole-body projection:", paper_paths["whole"])
         print("Cut-mesh projection:", paper_paths["cut"])
-        # 🚨 使用一开始保留下来的真实 Mask，防止 mIoU 受白底影响变 0
-        miou_score = calculate_miou(pred_mask_orig, mask_gt_resized)
-        print(f"      -> miou_score: {miou_score:.4f}")
+    except Exception as e:
+        print(f"⚠️ paper visualization skipped: {e}")
 
-        INTACT_MAPPING = {METAINFO['keypoint_info'][i]['name']: i for i in range(0, 17)}
-        RES_MAPPING = {METAINFO['keypoint_info'][i]['name']: i for i in range(23, 31)}
-        mpjpe_intact = calculate_2d_mpjpe(pred_joints_3d, kpts_orig, global_cam, INTACT_MAPPING)
-        mpjpe_residual = calculate_2d_mpjpe(pred_joints_3d, kpts_orig, global_cam, RES_MAPPING)
+    # ============================================================
+    # 10. 返回给外层统计
+    # 这里 mIoU 用 merged_miou；MPJPE 用 matched persons 的平均。
+    # ============================================================
+    final_miou = merged_miou
+    final_mpjpe_intact = _safe_mean(mpjpe_intact_scores, default=0)
+    final_mpjpe_residual = _safe_mean(mpjpe_residual_scores, default=0)
 
-        print(f"📊 [量化评估] 完整关节 2D MPJPE: {mpjpe_intact:.2f} pixels")
-        print(f"📊 [量化评估] 残肢端点 2D MPJPE: {mpjpe_residual:.2f} pixels")
+    final_aa_mpjpe = _safe_mean(aa_mpjpe_scores, default=None)
+    final_aa_r_mpjpe = _safe_mean(aa_r_mpjpe_scores, default=None)
+    final_aa_pa_mpjpe = _safe_mean(aa_pa_mpjpe_scores, default=None)
 
-        aa_mpjpe, aa_r_mpjpe, aa_pa_mpjpe = calculate_aa_3d_metrics(
-            pred_joints_3d=pred_joints_3d,
-            gt_3d_kpts=gt_3d_kpts,
-            kpt_types_orig=types_orig,
-            unit_scale=1000.0,  # meter -> mm
-        )
-        if gt_3d_kpts is not None:
-            vis_prefix = os.path.join(dir_name, "aa_metric_vis")
-            visualize_aa_alignment(
-                pred_joints_3d=pred_joints_3d,
-                gt_3d_kpts=gt_3d_kpts,
-                kpt_types_orig=types_orig,
-                save_prefix=vis_prefix
-            )
+    print("========== Final multi-person result ==========")
+    print(f"mIoU: {final_miou:.4f}")
+    print(f"Intact 2D MPJPE: {final_mpjpe_intact:.2f}")
+    print(f"Residual 2D MPJPE: {final_mpjpe_residual:.2f}")
+    print(f"AA-MPJPE: {final_aa_mpjpe}")
+    print(f"AA-R-MPJPE: {final_aa_r_mpjpe}")
+    print(f"AA-PA-MPJPE: {final_aa_pa_mpjpe}")
+    print("==============================================")
 
-        if aa_mpjpe is not None:
-            print(f"📊 [3D评估] AA-MPJPE: {aa_mpjpe:.2f} mm")
-        else:
-            print("📊 [3D评估] AA-MPJPE: skipped")
-
-        if aa_pa_mpjpe is not None:
-            print(f"📊 [3D评估] AA-PA-MPJPE: {aa_pa_mpjpe:.2f} mm")
-        else:
-            print("📊 [3D评估] AA-PA-MPJPE: skipped")
-
-        if aa_r_mpjpe is not None:
-            print(f"📊 [3D评估] AA-R-MPJPE: {aa_r_mpjpe:.2f} mm")
-        else:
-            print("📊 [3D评估] AA-R-MPJPE: skipped")
-
-        return miou_score, mpjpe_intact, mpjpe_residual, aa_mpjpe, aa_r_mpjpe, aa_pa_mpjpe
-
-    # 如果没有 cut tasks，随便返回个值或者 0
-    return 0, 0, 0, None, None, None
-
+    return (
+        final_miou,
+        final_mpjpe_intact,
+        final_mpjpe_residual,
+        final_aa_mpjpe,
+        final_aa_r_mpjpe,
+        final_aa_pa_mpjpe,
+    )
 
 if __name__ == "__main__":
     reconstructor = ReconstructionEngine()
