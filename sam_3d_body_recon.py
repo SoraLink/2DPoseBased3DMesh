@@ -338,7 +338,7 @@ class ReconstructionEngine:
             pred_cam=pred_cam,
             out_path=out_path,
             color=(0.78, 0.78, 0.78),
-            alpha=0.78,
+            alpha=1.0,
         )
 
     def render_paper_projections(
@@ -453,7 +453,8 @@ class ReconstructionEngine:
         """
         import cv2
         import numpy as np
-
+        color = (0.58, 0.58, 0.58)
+        alpha = 1
         img = cv2.imread(image_path, cv2.IMREAD_COLOR)
         if img is None:
             raise ValueError(f"Cannot read image: {image_path}")
